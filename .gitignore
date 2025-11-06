@@ -1,0 +1,56 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+# если используешь pnpm - pnpm-lock.yaml можно оставить или тоже игнорировать по необходимости
+
+# dotenv
+.env
+.env.*.local
+.env.local
+.env.test
+
+# SQLite
+/data/*.sqlite
+/*.sqlite
+*.db
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE/editor
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# ngrok
+.ngrok/
+
+# Build / dist
+dist/
+build/
+
+# coverage
+coverage/
+
+# temp
+tmp/
+temp/
+*.tmp
+
+# Mac / Linux swap
+*~
+*.swp
+
+# secrets (extra safety)
+secrets.*
+*.pem
+*.key
