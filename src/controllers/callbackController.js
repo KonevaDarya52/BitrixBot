@@ -32,8 +32,7 @@ module.exports = async function(req, res) {
     console.error(err.response ? err.response.data : err);
     res.status(500).send('Auth failed');
   }
-};const axios = require('axios');
-const db = require('../db/sqlite');
+};
 
 module.exports = async function(req, res) {
   const code = req.query.code;

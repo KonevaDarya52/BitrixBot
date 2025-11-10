@@ -1,0 +1,2 @@
+https://bzs.bitrix24.ru/rest/21/427kxt2tqqzprqro/lists.element.add.json  входящий вебхук
+42ng615uj0hgubw1h58rsanl08w0utto токен приложение исходящий вебхук

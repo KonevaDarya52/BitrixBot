@@ -1,36 +1,27 @@
-import axios from 'axios';
-import dotenv from 'dotenv';
+const express = require('express');
+const router = express.Router();
 
-dotenv.config();
-
-const { BITRIX_CLIENT_ID, BITRIX_SECRET, BITRIX_DOMAIN } = process.env;
-
-export async function getAccessToken(code) {
-  try {
-    const response = await axios.post(`https://${BITRIX_DOMAIN}/oauth/token/`, {
-      grant_type: 'authorization_code',
-      client_id: BITRIX_CLIENT_ID,
-      client_secret: BITRIX_SECRET,
-      code,
+// Простой маршрут для аутентификации
+router.get('/callback', (req, res) => {
+    const { code } = req.query;
+    
+    if (!code) {
+        return res.status(400).json({ error: 'No authorization code provided' });
+    }
+    
+    console.log('🔐 Authorization code received:', code);
+    res.json({ 
+        message: 'Authorization successful', 
+        code: code,
+        next_step: 'Exchange code for access token'
     });
-    return response.data;
-  } catch (error) {
-    console.error('Ошибка при получении токена:', error);
-    throw error;
-  }
-}
+});
 
-export async function refreshAccessToken(refreshToken) {
-  try {
-    const response = await axios.post(`https://${BITRIX_DOMAIN}/oauth/token/`, {
-      grant_type: 'refresh_token',
-      client_id: BITRIX_CLIENT_ID,
-      client_secret: BITRIX_SECRET,
-      refresh_token: refreshToken,
+router.get('/status', (req, res) => {
+    res.json({ 
+        status: 'Auth service is running',
+        timestamp: new Date().toISOString()
     });
-    return response.data;
-  } catch (error) {
-    console.error('Ошибка при обновлении токена:', error);
-    throw error;
-  }
-}
+});
+
+module.exports = router;

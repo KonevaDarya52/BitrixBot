@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node app.js",
+    "dev": "node app.js",
+    "init-db": "node -e \"require('./models/database').initDB()\""
   },
   "repository": {
     "type": "git",
@@ -25,6 +28,7 @@
     "express": "^5.1.0",
     "knex": "^3.1.0",
     "node-cron": "^4.2.1",
+    "node-telegram-bot-api": "^0.66.0",
     "nodemailer": "^7.0.10",
     "sqlite3": "^5.1.7"
   },

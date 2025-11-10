@@ -1,11 +1,10 @@
-
-const db = require('../db/sqlite');  // БЫЛО: require('../../db/sqlite')
+const db = require('../db/sqlite');
 
 class Database {
   async initDB() {
     try {
       // Таблица сотрудников
-      await db.run(`
+      await db.runAsync(`
         CREATE TABLE IF NOT EXISTS employees (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           bx_user_id INTEGER UNIQUE,
@@ -17,7 +16,7 @@ class Database {
       `);
 
       // Таблица офисов
-      await db.run(`
+      await db.runAsync(`
         CREATE TABLE IF NOT EXISTS offices (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           name TEXT,
@@ -29,7 +28,7 @@ class Database {
       `);
 
       // Таблица отметок
-      await db.run(`
+      await db.runAsync(`
         CREATE TABLE IF NOT EXISTS attendance_events (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           bx_user_id INTEGER,
@@ -45,7 +44,7 @@ class Database {
       `);
 
       // Таблица расписаний
-      await db.run(`
+      await db.runAsync(`
         CREATE TABLE IF NOT EXISTS work_schedules (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           bx_user_id INTEGER,
@@ -60,59 +59,26 @@ class Database {
     } catch (error) {
       console.error('❌ Database initialization error:', error);
     }
-  },
-  CREATE TABLE IF NOT EXISTS employees (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  bx_user_id INTEGER UNIQUE,
-  full_name TEXT,
-  email TEXT
-);
+  }
 
-CREATE TABLE IF NOT EXISTS offices (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT,
-  lat REAL,
-  lon REAL,
-  radius_m INTEGER DEFAULT 50
-);
-
-CREATE TABLE IF NOT EXISTS attendance_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  bx_user_id INTEGER,
-  office_id INTEGER,
-  event_type TEXT, -- 'in' or 'out' or 'scan'
-  timestamp INTEGER, -- unix epoch seconds
-  lat REAL,
-  lon REAL,
-  device_id TEXT,
-  status TEXT, -- 'ok','out_of_zone','no_token','invalid_user','replay'
-  notes TEXT
-);
-
-CREATE TABLE IF NOT EXISTS work_schedules (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  bx_user_id INTEGER,
-  start_time TEXT, -- e.g. "09:00"
-  end_time TEXT,   -- e.g. "18:00"
-  weekdays TEXT -- e.g. "1,2,3,4,5"
-);
-
-async addEmployee(bxUserId, fullName, email) {
+  // Методы для работы с сотрудниками
+  async addEmployee(bxUserId, fullName, email) {
     const sql = `INSERT OR REPLACE INTO employees (bx_user_id, full_name, email) VALUES (?, ?, ?)`;
-    return await db.run(sql, [bxUserId, fullName, email]);
+    return await db.runAsync(sql, [bxUserId, fullName, email]);
   }
 
   async getEmployeeByBxId(bxUserId) {
     const sql = `SELECT * FROM employees WHERE bx_user_id = ?`;
-    return await db.get(sql, [bxUserId]);
+    return await db.getAsync(sql, [bxUserId]);
   }
 
+  // Методы для работы с отметками
   async addAttendanceEvent(bxUserId, eventType, lat, lon, status = 'ok') {
     const sql = `
       INSERT INTO attendance_events (bx_user_id, event_type, lat, lon, status) 
       VALUES (?, ?, ?, ?, ?)
     `;
-    return await db.run(sql, [bxUserId, eventType, lat, lon, status]);
+    return await db.runAsync(sql, [bxUserId, eventType, lat, lon, status]);
   }
 
   async getTodayEvents(bxUserId) {
@@ -122,7 +88,7 @@ async addEmployee(bxUserId, fullName, email) {
       AND DATE(timestamp) = DATE('now') 
       ORDER BY timestamp
     `;
-    return await db.all(sql, [bxUserId]);
+    return await db.allAsync(sql, [bxUserId]);
   }
 
   async getUsersWithoutCheckout() {
@@ -143,7 +109,7 @@ async addEmployee(bxUserId, fullName, email) {
         AND ae.event_type = 'in'
       )
     `;
-    return await db.all(sql);
+    return await db.allAsync(sql);
   }
 
   async getDailyReport() {
@@ -159,7 +125,7 @@ async addEmployee(bxUserId, fullName, email) {
       GROUP BY e.bx_user_id, e.full_name
       ORDER BY e.full_name
     `;
-    return await db.all(sql);
+    return await db.allAsync(sql);
   }
 }
 
