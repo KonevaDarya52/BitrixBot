@@ -1,38 +1,43 @@
 {
   "name": "bitrixbot",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Bitrix24 bot for employee attendance tracking",
+  "main": "app.js",
+  "type": "commonjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node app.js",
-    "dev": "node app.js",
-    "init-db": "node -e \"require('./models/database').initDB()\""
+    "dev": "nodemon app.js",
+    "init-db": "node -e \"require('./src/models/database').initDB()\"",
+    "test": "echo \"No tests specified\" && exit 0"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/KonevaDarya52/BitrixBot.git"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "bitrix24",
+    "bot",
+    "attendance",
+    "geolocation"
+  ],
+  "author": "Your Name",
   "license": "ISC",
-  "type": "commonjs",
   "bugs": {
     "url": "https://github.com/KonevaDarya52/BitrixBot/issues"
   },
   "homepage": "https://github.com/KonevaDarya52/BitrixBot#readme",
   "dependencies": {
-    "axios": "^1.13.2",
-    "body-parser": "^2.2.0",
-    "dotenv": "^17.2.3",
-    "express": "^5.1.0",
-    "knex": "^3.1.0",
-    "node-cron": "^4.2.1",
-    "node-telegram-bot-api": "^0.66.0",
-    "nodemailer": "^7.0.10",
-    "sqlite3": "^5.1.7"
+    "axios": "^1.6.0",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "node-cron": "^3.0.3",
+    "sqlite3": "^5.1.6"
   },
   "devDependencies": {
-    "nodemon": "^3.1.10"
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
