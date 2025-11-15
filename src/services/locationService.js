@@ -1,8 +1,9 @@
 class LocationService {
   constructor() {
-    this.officeLat = parseFloat(process.env.OFFICE_LAT);
-    this.officeLon = parseFloat(process.env.OFFICE_LON);
-    this.officeRadius = parseInt(process.env.OFFICE_RADIUS);
+    // Координаты офиса (Москва, Кремль для теста)
+    this.officeLat = 55.7520;
+    this.officeLon = 37.6175;
+    this.officeRadius = 500; // 500 метров
   }
 
   // Проверка находится ли пользователь в офисе
@@ -18,6 +19,10 @@ class LocationService {
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     
     const distance = earthRadius * c;
+    
+    console.log(`📍 Distance from office: ${distance.toFixed(2)}m (radius: ${this.officeRadius}m)`);
+    console.log(`📍 Office: ${this.officeLat}, ${this.officeLon}`);
+    console.log(`📍 User: ${userLat}, ${userLon}`);
     
     return distance <= this.officeRadius;
   }

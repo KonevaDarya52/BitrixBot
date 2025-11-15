@@ -1,4 +1,5 @@
 const path = require('path');
+const adminRouter = require('./src/routes/admin');
 
 // Для Railway переменные уже установлены
 if (process.env.NODE_ENV !== 'production') {
@@ -18,7 +19,7 @@ const botRouter = require('./src/routes/bot');
 const webhookRouter = require('./src/routes/webhook');
 const authRouter = require('./src/routes/auth');
 const checkinRouter = require('./src/routes/checkin');
-
+app.use('/admin', adminRouter);
 app.use('/api', apiRouter);
 app.use('/bot', botRouter);
 app.use('/webhook', webhookRouter);
