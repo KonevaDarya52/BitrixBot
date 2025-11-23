@@ -1,7 +1,0 @@
-POST https://bzs.bitrix24.ru/rest/21/427kxt2tqqzprqro/im.message.add.json
-Content-Type: application/json
-
-{
-  "DIALOG_ID": "15",
-  "MESSAGE": "Привет, это мой первый бот через API!"
-}
