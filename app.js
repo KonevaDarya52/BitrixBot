@@ -36,13 +36,12 @@ async function initializeApp() {
         console.log('✅ Database initialized successfully');
         
         // Регистрируем бота (пропускаем ошибки)
-        console.log('🤖 Registering bot...');
-        try {
-            await bitrixService.registerBot();
-            console.log('✅ Bot registered successfully');
-        } catch (botError) {
-            console.log('⚠️ Bot registration skipped (may already exist):', botError.message);
-        }
+try {
+  await bitrixService.createBotAutomatically();
+  console.log('✅ Bot created successfully');
+} catch (botError) {
+  console.log('⚠️ Bot creation skipped:', botError.message);
+}
         
         // Инициализируем cron jobs
         console.log('⏰ Initializing cron jobs...');

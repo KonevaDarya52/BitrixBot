@@ -56,31 +56,55 @@ class BitrixService {
     return this.sendMessageWithKeyboard(dialogId, message, buttons);
   }
 
-  async registerBot() {
-    try {
-      const url = `https://${this.domain}/rest/im.bot.add`;
-      
-      const botData = {
-        CODE: 'attendance_bot',
-        TYPE: 'H',
-        AUTH: this.webhookToken
-      };
-
-      console.log('🤖 Registering bot...');
-      const response = await axios.post(`${url}?auth=${this.webhookToken}`, botData);
-      
-      console.log('✅ Bot registered:', response.data);
-      return response.data;
-    } catch (error) {
-      // Если бот уже существует - это не ошибка
-      if (error.response?.data?.error === 'BOT_ALREADY_EXISTS') {
-        console.log('✅ Bot already exists');
-        return { result: 'Bot already exists' };
+async createBotAutomatically() {
+  try {
+    const url = `https://${this.domain}/rest/im.bot.add`;
+    
+    const botData = {
+      CODE: 'attendance_bot',
+      TYPE: 'H', // Human bot
+      PROPERTIES: {
+        NAME: 'Бот учета рабочего времени',
+        COLOR: 'AQUA',
+        EMAIL: 'attendance-bot@company.com',
+        WORK_POSITION: 'Учет рабочего времени',
+        DESCRIPTION: 'Помогает отмечать приход и уход сотрудников'
       }
-      console.error('❌ Bot registration failed:', error.response?.data || error.message);
-      throw error;
+    };
+
+    console.log('🤖 Creating bot via API...');
+    const response = await axios.post(`${url}?auth=${this.webhookToken}`, botData);
+    
+    console.log('✅ Bot created successfully:', response.data);
+    return response.data;
+  } catch (error) {
+    console.error('❌ Bot creation failed:', error.response?.data || error.message);
+    
+    // Если бот уже существует
+    if (error.response?.data?.error === 'BOT_ALREADY_EXISTS') {
+      console.log('ℹ️ Bot already exists, fetching info...');
+      return await this.getBotInfo();
     }
+    throw error;
   }
+}
+
+async getBotInfo() {
+  try {
+    const url = `https://${this.domain}/rest/im.bot.list`;
+    const response = await axios.post(`${url}?auth=${this.webhookToken}`);
+    
+    const ourBot = response.data.result.find(bot => bot.CODE === 'attendance_bot');
+    if (ourBot) {
+      console.log('✅ Found existing bot:', ourBot);
+      return ourBot;
+    }
+    return null;
+  } catch (error) {
+    console.error('❌ Error getting bot list:', error.message);
+    return null;
+  }
+}
 
   // Получение информации о пользователе
   async getUserInfo(userId) {
