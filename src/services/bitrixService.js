@@ -56,24 +56,31 @@ class BitrixService {
     return this.sendMessageWithKeyboard(dialogId, message, buttons);
   }
 
- async registerBot() {
-  try {
-    const url = `https://b24-etqwns.bitrix24.ru/rest/im.bot.add.json`;
-    
-    const botData = {
-      CODE: 'attendance_bot',
-      TYPE: 'H', // H - человеческий бот
-      AUTH: this.webhookToken
-    };
+  async registerBot() {
+    try {
+      const url = `https://${this.domain}/rest/im.bot.add`;
+      
+      const botData = {
+        CODE: 'attendance_bot',
+        TYPE: 'H',
+        AUTH: this.webhookToken
+      };
 
-    const response = await axios.post(url, botData);
-    console.log('✅ Bot registered:', response.data);
-    return response.data;
-  } catch (error) {
-    console.error('❌ Bot registration failed:', error.response?.data);
-    throw error;
+      console.log('🤖 Registering bot...');
+      const response = await axios.post(`${url}?auth=${this.webhookToken}`, botData);
+      
+      console.log('✅ Bot registered:', response.data);
+      return response.data;
+    } catch (error) {
+      // Если бот уже существует - это не ошибка
+      if (error.response?.data?.error === 'BOT_ALREADY_EXISTS') {
+        console.log('✅ Bot already exists');
+        return { result: 'Bot already exists' };
+      }
+      console.error('❌ Bot registration failed:', error.response?.data || error.message);
+      throw error;
+    }
   }
-}
 
   // Получение информации о пользователе
   async getUserInfo(userId) {
@@ -84,6 +91,31 @@ class BitrixService {
     } catch (error) {
       console.error('Error getting user info:', error);
       return null;
+    }
+  }
+
+    async sendMessage(dialogId, message, attachments = null) {
+    try {
+      const url = `https://${this.domain}/rest/im.message.add`;
+      
+      const payload = {
+        DIALOG_ID: dialogId,
+        MESSAGE: message,
+        SYSTEM: 'N'
+      };
+
+      if (attachments) {
+        payload.ATTACH = attachments;
+      }
+
+      console.log('📤 Sending message to:', dialogId);
+      const response = await axios.post(`${url}?auth=${this.webhookToken}`, payload);
+      
+      console.log('✅ Message sent successfully');
+      return response.data;
+    } catch (error) {
+      console.error('❌ Error sending message:', error.response?.data || error.message);
+      throw error;
     }
   }
 
