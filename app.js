@@ -44,16 +44,17 @@ async function initializeApp() {
         await database.initDB();
         console.log('✅ Database initialized');
         
+        // Регистрируем бота
+        await bitrixService.registerBot();
+        console.log('✅ Bot registered in Bitrix24');
+        
         cronJobs.initCronJobs();
         
         app.listen(port, '0.0.0.0', () => {
             console.log(`🚀 Bot server running on port ${port}`);
-            console.log(`📍 Bitrix domain: ${process.env.BITRIX_DOMAIN || 'Not set'}`);
-            console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
         });
     } catch (error) {
         console.error('❌ Failed to initialize app:', error);
-        process.exit(1);
     }
 }
 

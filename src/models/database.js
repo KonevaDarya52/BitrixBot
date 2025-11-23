@@ -72,6 +72,11 @@ class Database {
     return await db.getAsync(sql, [bxUserId]);
   }
 
+  async getAllActiveEmployees() {
+  const sql = `SELECT * FROM employees WHERE is_active = 1`;
+  return await db.allAsync(sql);
+}
+
   // Методы для работы с отметками
   async addAttendanceEvent(bxUserId, eventType, lat, lon, status = 'ok') {
     const sql = `

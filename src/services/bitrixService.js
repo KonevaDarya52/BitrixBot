@@ -9,7 +9,7 @@ class BitrixService {
   // Отправка сообщения через REST API
   async sendMessage(dialogId, message, attachments = null) {
     try {
-      const url = `https://${this.domain}/rest/im.message.add.json`;
+      const url = `https://b24-etqwns.bitrix24.ru/rest/im.message.add.json`;
       
       const payload = {
         DIALOG_ID: dialogId,
@@ -56,10 +56,29 @@ class BitrixService {
     return this.sendMessageWithKeyboard(dialogId, message, buttons);
   }
 
+ async registerBot() {
+  try {
+    const url = `https://b24-etqwns.bitrix24.ru/rest/im.bot.add.json`;
+    
+    const botData = {
+      CODE: 'attendance_bot',
+      TYPE: 'H', // H - человеческий бот
+      AUTH: this.webhookToken
+    };
+
+    const response = await axios.post(url, botData);
+    console.log('✅ Bot registered:', response.data);
+    return response.data;
+  } catch (error) {
+    console.error('❌ Bot registration failed:', error.response?.data);
+    throw error;
+  }
+}
+
   // Получение информации о пользователе
   async getUserInfo(userId) {
     try {
-      const url = `https://${this.domain}/rest/user.get.json`;
+      const url = `https://b24-etqwns.bitrix24.ru/rest/user.get.json`;
       const response = await axios.post(url, { ID: userId });
       return response.data.result[0];
     } catch (error) {
