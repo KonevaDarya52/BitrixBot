@@ -7,45 +7,37 @@ const port = process.env.PORT || 3000;
 
 app.use(bodyParser.json());
 
-// Импортируем базу данных и инициализируем
-const database = require('./src/models/database');
-const cronJobs = require('./src/jobs/cronJobs');
+// Простой обработчик установки
+app.get('/install', (req, res) => {
+    const clientId = process.env.BITRIX_CLIENT_ID;
+    const domain = process.env.BITRIX_DOMAIN;
+    
+    const authUrl = `https://${domain}/oauth/authorize/?client_id=${clientId}&response_type=code`;
+    
+    res.json({
+        message: '✅ Ссылка для установки бота:',
+        install_url: authUrl,
+        instructions: 'Перейдите по ссылке выше чтобы установить бота в ваш Bitrix24'
+    });
+});
 
-// Основные роуты
-app.use('/imbot', require('./src/controllers/botHandler'));
-app.use('/install', require('./src/controllers/installHandler'));
+// Обработчик для бота
+app.post('/imbot', (req, res) => {
+    console.log('🤖 Получен запрос от бота:', req.body);
+    res.json({ status: 'ok' });
+});
 
-// Простые роуты
+// Главная страница
 app.get('/', (req, res) => {
-    res.json({ 
-        status: 'Bitrix Bot is running', 
-        version: '1.0.0',
+    res.json({
+        status: 'Бот учета времени работает!',
         endpoints: {
             install: '/install',
-            webhook: '/imbot'
+            bot: '/imbot'
         }
     });
 });
 
-app.get('/health', (req, res) => {
-    res.json({ status: 'ok', time: new Date().toISOString() });
+app.listen(port, '0.0.0.0', () => {
+    console.log(`🚀 Сервер запущен на порту ${port}`);
 });
-
-// Инициализация
-async function initializeApp() {
-    try {
-        await database.initDB();
-        console.log('✅ Database initialized');
-        
-        cronJobs.initCronJobs();
-        console.log('✅ Cron jobs initialized');
-        
-        app.listen(port, '0.0.0.0', () => {
-            console.log(`🚀 Bot server running on port ${port}`);
-        });
-    } catch (error) {
-        console.error('❌ Initialization failed:', error);
-    }
-}
-
-initializeApp();
