@@ -7,9 +7,15 @@ const port = process.env.PORT || 10000;
 
 app.use(express.json());
 
-// Главная страница - ДОЛЖНА РАБОТАТЬ
+// ВАЖНО: Этот middleware должен быть ПЕРВЫМ
+app.use((req, res, next) => {
+    console.log(`📍 ${new Date().toISOString()} ${req.method} ${req.url}`);
+    next();
+});
+
+// Главная страница
 app.get('/', (req, res) => {
-    console.log('📍 Главная страница запрошена');
+    console.log('🎯 Serving main page');
     res.send(`
         <!DOCTYPE html>
         <html>
@@ -45,29 +51,23 @@ app.get('/', (req, res) => {
     `);
 });
 
-// УСТАНОВКА - ОЧЕНЬ ВАЖНО: этот маршрут должен быть ОТДЕЛЬНЫМ
-app.get('/install', (req, res) => {
-    console.log('📥 INSTALL route called - STEP 1');
+// УСТАНОВКА - отдельный маршрут
+app.get('/install', async (req, res) => {
+    console.log('🎯 Serving install page');
     const { code } = req.query;
     
     if (!code) {
         console.log('🔐 No code - redirecting to OAuth');
         const redirectUri = 'https://bitrixbot-spr9.onrender.com/install';
         const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`;
-        console.log('🔗 Redirect to OAuth:', authUrl);
+        console.log('🔗 Redirect to:', authUrl);
         return res.redirect(authUrl);
     }
     
-    // Если есть код - обрабатываем OAuth callback
     console.log('🔄 Processing OAuth callback with code');
-    handleOAuthCallback(code, res);
-});
-
-// Функция обработки OAuth callback
-async function handleOAuthCallback(code, res) {
+    
     try {
-        console.log('🔐 Getting access token with code:', code.substring(0, 10) + '...');
-        
+        // Получаем access token
         const tokenUrl = 'https://oauth.bitrix.info/oauth/token/';
         const tokenResponse = await axios.post(tokenUrl, null, {
             params: {
@@ -79,7 +79,7 @@ async function handleOAuthCallback(code, res) {
             }
         });
 
-        const { access_token, refresh_token, domain } = tokenResponse.data;
+        const { access_token, domain } = tokenResponse.data;
         console.log('✅ Access token получен для домена:', domain);
 
         // Регистрируем бота
@@ -100,7 +100,7 @@ async function handleOAuthCallback(code, res) {
 
         console.log('✅ Бот зарегистрирован:', botResponse.data);
 
-        // Показываем страницу успеха
+        // Успешная установка
         res.send(`
             <!DOCTYPE html>
             <html>
@@ -158,13 +158,12 @@ async function handleOAuthCallback(code, res) {
             </html>
         `);
     }
-}
+});
 
-// Вебхук для бота - POST запросы
+// Вебхук для бота - ТОЛЬКО POST
 app.post('/imbot', async (req, res) => {
+    console.log('🎯 POST to /imbot - webhook received');
     try {
-        console.log('🤖 Webhook received:', req.body.event);
-        
         const { data, event, auth } = req.body;
         
         if (event === 'ONIMBOTMESSAGEADD') {
@@ -183,13 +182,45 @@ app.post('/imbot', async (req, res) => {
     }
 });
 
-// GET для /imbot (только для проверки)
+// GET для /imbot - ОТДЕЛЬНЫЙ маршрут
 app.get('/imbot', (req, res) => {
+    console.log('🎯 GET to /imbot - test endpoint');
     res.json({ 
         status: 'active', 
         message: 'Bot webhook is ready for POST requests',
         timestamp: new Date().toISOString(),
         note: 'This endpoint should receive POST requests from Bitrix24'
+    });
+});
+
+// Статус
+app.get('/status', (req, res) => {
+    console.log('🎯 Serving status page');
+    res.json({ 
+        status: 'active', 
+        timestamp: new Date().toISOString(),
+        service: 'Bitrix24 Time Tracker Bot'
+    });
+});
+
+// Дебаг
+app.get('/debug', (req, res) => {
+    console.log('🎯 Serving debug page');
+    res.json({
+        message: 'Debug endpoint - ROUTES SHOULD WORK NOW',
+        routes: {
+            main: '/',
+            install: '/install',
+            webhook: '/imbot (POST)',
+            status: '/status',
+            debug: '/debug'
+        },
+        environment: {
+            BITRIX_DOMAIN: process.env.BITRIX_DOMAIN,
+            BITRIX_CLIENT_ID: process.env.BITRIX_CLIENT_ID ? 'SET' : 'NOT SET',
+            PORT: process.env.PORT
+        },
+        timestamp: new Date().toISOString()
     });
 });
 
@@ -211,7 +242,7 @@ async function handleAppInstall(data, auth) {
             params: { auth: auth.access_token }
         });
         
-        console.log('✅ Бот зарегистрирован при установке:', botResponse.data);
+        console.log('✅ Бот зарегистрирован при установке');
         
     } catch (error) {
         console.error('❌ Bot registration error:', error.response?.data || error.message);
@@ -224,15 +255,7 @@ async function handleWelcomeMessage(data, auth) {
         const { PARAMS } = data;
         const { DIALOG_ID } = PARAMS;
         
-        const welcomeMessage = `🤖 Добро пожаловать в бот учета рабочего времени!
-
-Для работы используйте команды:
-📍 "пришел" - отметить приход в офис
-🚪 "ушел" - отметить уход из офиса  
-📊 "статус" - посмотреть сегодняшние отметки
-❓ "помощь" - справка по командам
-
-Для отметок требуется отправка геолокации через скрепку 📎`;
+        const welcomeMessage = `🤖 Добро пожаловать в бот учета рабочего времени!`;
         
         await axios.post(`https://${auth.domain}/rest/imbot.message.add`, {
             DIALOG_ID: DIALOG_ID,
@@ -267,26 +290,13 @@ async function handleBotMessage(data, auth) {
                 response = `🚪 Для отметки ухода отправьте ваше местоположение через скрепку 📎`;
                 break;
             case 'статус':
-                response = `📊 *Ваш статус за сегодня:*
-
-✅ Пришел: не отмечен
-✅ Ушел: не отмечен
-
-📍 Используйте команду "пришел" для отметки`;
+                response = `📊 Ваш статус за сегодня: приход и уход не отмечены`;
                 break;
             case 'помощь':
-                response = `🤖 *Бот учета рабочего времени*
-
-*Команды:*
-📍 пришел - отметить приход
-🚪 ушел - отметить уход  
-📊 статус - посмотреть отметки
-❓ помощь - эта справка
-
-*Для отметок требуется отправка геолокации через скрепку 📎*`;
+                response = `🤖 Бот учета рабочего времени. Команды: пришел, ушел, статус, помощь`;
                 break;
             default:
-                response = `❓ Не понимаю команду. Напишите "помощь" для списка команд`;
+                response = `❓ Не понимаю команду. Напишите "помощь"`;
         }
         
         await sendBotMessage(BOT_ID, DIALOG_ID, response, auth);
@@ -314,32 +324,13 @@ async function sendBotMessage(botId, dialogId, message, auth) {
     }
 }
 
-// Статус
-app.get('/status', (req, res) => {
-    res.json({ 
-        status: 'active', 
-        timestamp: new Date().toISOString(),
-        service: 'Bitrix24 Time Tracker Bot'
-    });
-});
-
-// Дебаг
-app.get('/debug', (req, res) => {
-    res.json({
-        message: 'Debug endpoint - ALL ROUTES SHOULD WORK',
-        routes: {
-            main: '/',
-            install: '/install',
-            webhook: '/imbot (POST)',
-            status: '/status',
-            debug: '/debug'
-        },
-        environment: {
-            BITRIX_DOMAIN: process.env.BITRIX_DOMAIN || 'NOT SET',
-            BITRIX_CLIENT_ID: process.env.BITRIX_CLIENT_ID ? 'SET' : 'NOT SET',
-            PORT: process.env.PORT
-        },
-        timestamp: new Date().toISOString()
+// Обработчик 404 - ДОЛЖЕН БЫТЬ ПОСЛЕДНИМ
+app.use('*', (req, res) => {
+    console.log('❌ 404 - Route not found:', req.originalUrl);
+    res.status(404).json({ 
+        error: 'Route not found',
+        path: req.originalUrl,
+        method: req.method
     });
 });
 
