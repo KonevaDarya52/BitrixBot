@@ -1,53 +1,56 @@
+const express = require('express');
+const router = express.Router();
 const axios = require('axios');
 
-class InstallHandler {
-    async handleInstall(req, res) {
-        try {
-            const { code, domain } = req.query;
-
-            if (!code) {
-                return res.status(400).json({ error: 'No authorization code' });
-            }
-
-            // Получаем access token
-            const tokenData = await this.getAccessToken(code, domain);
+// Страница установки
+router.get('/', async (req, res) => {
+    try {
+        const { code, domain } = req.query;
+        
+        if (!code) {
+            // Показываем ссылку для установки
+            const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent('https://bitrixbot-spr9.onrender.com/install/')}`;
             
-            // Регистрируем бота
-            await this.registerBot(tokenData.access_token, domain);
-
-            res.json({
-                status: 'success',
-                message: 'Бот успешно установлен!',
-                bot_code: 'attendance_bot'
+            return res.json({
+                message: 'Для установки бота перейдите по ссылке:',
+                install_url: authUrl
             });
-        } catch (error) {
-            console.error('❌ Installation error:', error);
-            res.status(500).json({ error: 'Installation failed' });
         }
-    }
 
-    async getAccessToken(code, domain) {
-        const url = 'https://oauth.bitrix.info/oauth/token/';
-        const response = await axios.post(url, null, {
+        // Получаем access token
+        const tokenUrl = 'https://oauth.bitrix.info/oauth/token/';
+        const tokenResponse = await axios.post(tokenUrl, null, {
             params: {
                 grant_type: 'authorization_code',
                 client_id: process.env.BITRIX_CLIENT_ID,
                 client_secret: process.env.BITRIX_CLIENT_SECRET,
-                code: code
+                code: code,
+                redirect_uri: 'https://bitrixbot-spr9.onrender.com/install/'
             }
         });
-        return response.data;
-    }
 
-    async registerBot(accessToken, domain) {
-        const url = `https://${domain}/rest/imbot.register`;
-        const response = await axios.post(url, {
+        const { access_token } = tokenResponse.data;
+
+        // Регистрируем бота
+        const botUrl = `https://${domain || process.env.BITRIX_DOMAIN}/rest/imbot.register`;
+        await axios.post(botUrl, {
             CODE: 'attendance_bot',
             TYPE: 'H',
-            AUTH: accessToken
+            AUTH: access_token
         });
-        return response.data;
-    }
-}
 
-module.exports = new InstallHandler();
+        res.json({
+            status: 'success',
+            message: '🎉 Бот успешно установлен! Теперь вы можете найти его в чатах по имени "Бот учета рабочего времени"'
+        });
+
+    } catch (error) {
+        console.error('❌ Installation error:', error.response?.data || error.message);
+        res.status(500).json({
+            error: 'Installation failed',
+            details: error.response?.data || error.message
+        });
+    }
+});
+
+module.exports = router;
