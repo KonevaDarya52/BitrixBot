@@ -58,7 +58,7 @@ app.get('/install', async (req, res) => {
     
     if (!code) {
         console.log('🔐 No code - redirecting to OAuth');
-        const redirectUri = 'https://bitrixbot-spr9.onrender.com/install';
+        const redirectUri = 'https://bitrixbot-bnnd.onrender.com/install';
         const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`;
         console.log('🔗 Redirect to:', authUrl);
         return res.redirect(authUrl);
@@ -75,7 +75,7 @@ app.get('/install', async (req, res) => {
                 client_id: process.env.BITRIX_CLIENT_ID,
                 client_secret: process.env.BITRIX_CLIENT_SECRET,
                 code: code,
-                redirect_uri: 'https://bitrixbot-spr9.onrender.com/install'
+                redirect_uri: 'https://bitrixbot-bnnd.onrender.com/install'
             }
         });
 
