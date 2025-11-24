@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Установка бота учета времени</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #2d8cff 0%, #1e6fd9 100%);
+            color: white;
+            padding: 40px 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+        
+        .header p {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .content {
+            padding: 40px 30px;
+        }
+        
+        .info-box {
+            background: #f0f8ff;
+            padding: 25px;
+            border-radius: 10px;
+            border-left: 5px solid #2d8cff;
+            margin-bottom: 30px;
+        }
+        
+        .install-button {
+            display: inline-block;
+            background: linear-gradient(135deg, #00d2ff 0%, #2d8cff 100%);
+            color: white;
+            padding: 18px 40px;
+            text-decoration: none;
+            border-radius: 50px;
+            font-size: 1.3em;
+            font-weight: bold;
+            text-align: center;
+            transition: all 0.3s ease;
+            box-shadow: 0 5px 15px rgba(45, 140, 255, 0.4);
+            margin: 20px 0;
+        }
+        
+        .install-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 8px 25px rgba(45, 140, 255, 0.6);
+        }
+        
+        .commands {
+            background: #f8f9fa;
+            padding: 30px;
+            border-radius: 10px;
+            margin: 30px 0;
+        }
+        
+        .command-list {
+            list-style: none;
+            margin-top: 20px;
+        }
+        
+        .command-list li {
+            padding: 12px 0;
+            border-bottom: 1px solid #e9ecef;
+            font-size: 1.1em;
+        }
+        
+        .command-list li:last-child {
+            border-bottom: none;
+        }
+        
+        .command-icon {
+            display: inline-block;
+            width: 30px;
+            text-align: center;
+            margin-right: 10px;
+        }
+        
+        .note {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            border-radius: 8px;
+            padding: 20px;
+            margin-top: 30px;
+        }
+        
+        .steps {
+            margin: 25px 0;
+        }
+        
+        .step {
+            display: flex;
+            align-items: flex-start;
+            margin-bottom: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        
+        .step-number {
+            background: #2d8cff;
+            color: white;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            margin-right: 15px;
+            flex-shrink: 0;
+        }
+        
+        @media (max-width: 600px) {
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .content {
+                padding: 20px 15px;
+            }
+            
+            .install-button {
+                padding: 15px 30px;
+                font-size: 1.1em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 Установка бота учета рабочего времени</h1>
+            <p>Автоматический учет прихода и ухода сотрудников</p>
+        </div>
+        
+        <div class="content">
+            <div class="info-box">
+                <h2>🎯 О боте</h2>
+                <p>Этот бот поможет автоматизировать учет рабочего времени сотрудников через Bitrix24. После установки бот появится в списке чатов.</p>
+            </div>
+            
+            <div class="steps">
+                <h3>📋 Процесс установки:</h3>
+                <div class="step">
+                    <div class="step-number">1</div>
+                    <div>Нажмите кнопку "Установить бота" ниже</div>
+                </div>
+                <div class="step">
+                    <div class="step-number">2</div>
+                    <div>Разрешите доступ приложению в Bitrix24</div>
+                </div>
+                <div class="step">
+                    <div class="step-number">3</div>
+                    <div>Найдите бота в списке чатов и начните общение</div>
+                </div>
+            </div>
+            
+            <div style="text-align: center;">
+                <a href="https://b24-etqwns.bitrix24.ru/oauth/authorize/?client_id=local.69243239019bc3.21171311&response_type=code&redirect_uri=https://bitrixbot-spr9.onrender.com/install" 
+                   class="install-button">
+                    📥 Установить бота в Bitrix24
+                </a>
+            </div>
+            
+            <div class="commands">
+                <h3>🛠 Команды бота:</h3>
+                <ul class="command-list">
+                    <li>
+                        <span class="command-icon">📍</span>
+                        <strong>Пришел</strong> - отметить приход в офисе
+                    </li>
+                    <li>
+                        <span class="command-icon">🚪</span>
+                        <strong>Ушел</strong> - отметить уход из офиса
+                    </li>
+                    <li>
+                        <span class="command-icon">📊</span>
+                        <strong>Статус</strong> - посмотреть сегодняшние отметки
+                    </li>
+                    <li>
+                        <span class="command-icon">❓</span>
+                        <strong>Помощь</strong> - показать справку по командам
+                    </li>
+                </ul>
+            </div>
+            
+            <div class="note">
+                <h4>💡 Важно:</h4>
+                <p>Для работы отметок прихода/ухода требуется разрешить отправку геолокации в мобильном приложении Bitrix24. Бот проверяет, что сотрудник находится в офисе.</p>
+            </div>
+            
+            <div style="text-align: center; margin-top: 30px; color: #666; font-size: 0.9em;">
+                <p>Если возникли проблемы с установкой, проверьте настройки приложения в Bitrix24</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

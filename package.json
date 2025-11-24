@@ -6,7 +6,6 @@
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "cleanup": "node cleanup.js",
     "init-db": "node -e \"require('./app.js').initDB()\""
   },
   "dependencies": {
