@@ -1,21 +1,14 @@
 {
   "name": "bitrix-time-bot",
   "version": "1.0.0",
-  "description": "Bitrix24 bot for employee attendance tracking",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js",
-    "dev": "nodemon app.js"
+    "start": "node app.js"
   },
   "dependencies": {
     "express": "^4.18.2",
     "axios": "^1.6.0",
-    "dotenv": "^16.3.1"
-  },
-  "devDependencies": {
-    "nodemon": "^3.0.1"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "dotenv": "^16.3.1",
+    "sqlite3": "^5.1.6"
   }
 }
