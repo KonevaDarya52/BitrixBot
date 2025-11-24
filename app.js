@@ -125,47 +125,116 @@ app.get('/install', async (req, res) => {
 
             console.log('✅ Бот зарегистрирован:', botResponse.data);
 
-            res.json({
-                status: 'success',
-                message: '🎉 Бот успешно установлен!',
-                next_steps: [
-                    'Найдите бота в списке чатов по имени "Бот учета рабочего времени"',
-                    'Напишите "помощь" для получения списка команд',
-                    'Используйте команды: пришел, ушел, статус'
-                ],
-                bot_info: botResponse.data.result
-            });
+            // Красивая HTML страница успеха
+            res.send(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Установка завершена</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
+                        .success { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }
+                        h1 { color: #4CAF50; }
+                        .next-steps { text-align: left; margin: 20px 0; }
+                    </style>
+                </head>
+                <body>
+                    <div class="success">
+                        <h1>🎉 Бот успешно установлен!</h1>
+                        <p>Бот "Учет рабочего времени" теперь доступен в вашем Bitrix24</p>
+                        
+                        <div class="next-steps">
+                            <h3>Что делать дальше:</h3>
+                            <ol>
+                                <li>Откройте чаты в Bitrix24</li>
+                                <li>Найдите бота "Учет рабочего времени"</li>
+                                <li>Напишите "помощь" для начала работы</li>
+                            </ol>
+                        </div>
+                        
+                        <p><a href="https://${domain || process.env.BITRIX_DOMAIN}">Перейти в Bitrix24</a></p>
+                    </div>
+                </body>
+                </html>
+            `);
 
         } catch (oauthError) {
             console.error('❌ OAuth error:', oauthError.response?.data || oauthError.message);
             
-            // Если OAuth не сработал, все равно показываем успех для теста
-            res.json({
-                status: 'success',
-                message: '🎉 Бот успешно установлен! (тестовый режим)',
-                note: 'OAuth процесс завершился с ошибкой, но бот должен работать',
-                error: oauthError.response?.data || oauthError.message
-            });
+            res.send(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>Установка завершена</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
+                        .success { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }
+                        h1 { color: #4CAF50; }
+                    </style>
+                </head>
+                <body>
+                    <div class="success">
+                        <h1>🎉 Бот установлен! (тестовый режим)</h1>
+                        <p>Бот должен появиться в чатах Bitrix24</p>
+                        <p><em>Примечание: OAuth процесс завершился с ошибкой, но базовый функционал должен работать</em></p>
+                        <p><a href="https://${domain || process.env.BITRIX_DOMAIN}">Перейти в Bitrix24</a></p>
+                    </div>
+                </body>
+                </html>
+            `);
         }
         
     } catch (error) {
         console.error('❌ Installation error:', error);
-        res.status(500).json({
-            error: 'Installation failed',
-            details: error.message
-        });
+        res.status(500).send(`
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Ошибка установки</title>
+                <style>
+                    body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f5f5f5; }
+                    .error { background: white; padding: 40px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 600px; margin: 0 auto; }
+                    h1 { color: #f44336; }
+                </style>
+            </head>
+            <body>
+                <div class="error">
+                    <h1>❌ Ошибка установки</h1>
+                    <p>${error.message}</p>
+                    <p><a href="/install-page">Попробовать снова</a></p>
+                </div>
+            </body>
+            </html>
+        `);
     }
 });
 
-// Вебхук для бота - основной endpoint
+// GET для /imbot - Bitrix24 иногда проверяет доступность
+app.get('/imbot', (req, res) => {
+    console.log('🔍 GET запрос на /imbot (проверка от Bitrix24)');
+    res.json({
+        status: 'active',
+        message: 'Webhook endpoint is ready for POST requests',
+        timestamp: new Date().toISOString()
+    });
+});
+
+// POST для /imbot - основной вебхук
 app.post('/imbot', async (req, res) => {
     try {
-        console.log('🤖 Webhook received:', JSON.stringify(req.body, null, 2));
+        console.log('🤖 POST Webhook received:', JSON.stringify(req.body, null, 2));
+        
+        if (!req.body || Object.keys(req.body).length === 0) {
+            console.log('📭 Empty request body');
+            return res.json({ status: 'ok' });
+        }
         
         const { event, data } = req.body;
         
         if (event === 'ONIMBOTMESSAGEADD') {
             await handleBotMessage(data);
+        } else {
+            console.log('🔔 Other event:', event);
         }
         
         // Всегда возвращаем успех Bitrix24
@@ -301,24 +370,13 @@ async function sendBotMessage(botId, dialogId, message) {
     }
 }
 
-// Обработка геолокации (будет добавлено позже)
-app.post('/webhook/message', async (req, res) => {
-    try {
-        console.log('📍 Location webhook:', JSON.stringify(req.body, null, 2));
-        res.json({ status: 'ok' });
-    } catch (error) {
-        console.error('Location webhook error:', error);
-        res.json({});
-    }
-});
-
 // Запуск сервера
 app.listen(port, '0.0.0.0', () => {
     console.log(`🚀 Сервер запущен на порту ${port}`);
     console.log(`📝 Главная страница: https://bitrixbot-spr9.onrender.com`);
     console.log(`📄 Страница установки: https://bitrixbot-spr9.onrender.com/install-page`);
     console.log(`🔗 API установки: https://bitrixbot-spr9.onrender.com/install`);
-    console.log(`🤖 Вебхук: https://bitrixbot-spr9.onrender.com/imbot`);
+    console.log(`🤖 Вебхук (GET/POST): https://bitrixbot-spr9.onrender.com/imbot`);
 });
 
 // Экспортируем для тестов
