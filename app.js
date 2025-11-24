@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const { markAttendance, getTodayAttendance } = require('./database');
 
 const app = express();
 const port = process.env.PORT || 10000;
