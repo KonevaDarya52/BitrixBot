@@ -207,14 +207,41 @@ app.post('/imbot', async (req, res) => {
     }
 });
 
-// GET для /imbot - только для тестирования
+// ВРЕМЕННО: Обработка OAuth callback в /imbot (если Bitrix отправляет сюда)
 app.get('/imbot', (req, res) => {
+    const { code, domain } = req.query;
+    
+    if (code && domain) {
+        console.log('🔄 OAuth callback received in /imbot, redirecting to /install');
+        console.log('🔑 Code:', code);
+        console.log('🏢 Domain:', domain);
+        
+        // Перенаправляем на /install с параметрами
+        return res.redirect(`/install?code=${code}&domain=${domain}`);
+    }
+    
     console.log('🎯 GET to /imbot - test endpoint');
     res.json({ 
         status: 'active', 
         message: 'Bot webhook is ready for POST requests',
         timestamp: new Date().toISOString(),
         note: 'This endpoint should receive POST requests from Bitrix24'
+    });
+});
+
+// Проверка конфигурации OAuth
+app.get('/oauth-check', (req, res) => {
+    const redirectUri = `https://${APP_DOMAIN}/install`;
+    const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    
+    res.json({
+        oauth_config: {
+            domain: process.env.BITRIX_DOMAIN,
+            client_id: process.env.BITRIX_CLIENT_ID,
+            redirect_uri: redirectUri,
+            auth_url: authUrl
+        },
+        correct: process.env.BITRIX_DOMAIN === 'b24-etqwns.bitrix24.ru'
     });
 });
 
