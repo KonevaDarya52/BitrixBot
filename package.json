@@ -1,37 +1,18 @@
 {
-  "name": "bitrixbot",
+  "name": "bitrix-time-bot",
   "version": "1.0.0",
   "description": "Bitrix24 bot for employee attendance tracking",
   "main": "app.js",
-  "type": "commonjs",
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "init-db": "node -e \"require('./src/models/database').initDB()\"",
-    "test": "echo \"No tests specified\" && exit 0"
+    "cleanup": "node cleanup.js",
+    "init-db": "node -e \"require('./app.js').initDB()\""
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/KonevaDarya52/BitrixBot.git"
-  },
-  "keywords": [
-    "bitrix24",
-    "bot",
-    "attendance",
-    "geolocation"
-  ],
-  "author": "Your Name",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/KonevaDarya52/BitrixBot/issues"
-  },
-  "homepage": "https://github.com/KonevaDarya52/BitrixBot#readme",
   "dependencies": {
-    "axios": "^1.6.0",
-    "body-parser": "^1.20.2",
-    "dotenv": "^16.3.1",
     "express": "^4.18.2",
-    "node-cron": "^3.0.3",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
     "sqlite3": "^5.1.6"
   },
   "devDependencies": {
