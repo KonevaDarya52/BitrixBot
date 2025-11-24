@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
+const { markAttendance, getTodayAttendance } = require('./database');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -46,11 +47,11 @@ app.get('/', (req, res) => {
 
 // Страница установки через OAuth
 app.get('/install', async (req, res) => {
-    const { code, domain } = req.query;
+    const { code } = req.query;
     
     if (!code) {
         // Первый шаг - перенаправляем на авторизацию
-        const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code`;
+        const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent('https://bitrixbot-spr9.onrender.com/install')}`;
         return res.redirect(authUrl);
     }
     
@@ -62,18 +63,28 @@ app.get('/install', async (req, res) => {
                 grant_type: 'authorization_code',
                 client_id: process.env.BITRIX_CLIENT_ID,
                 client_secret: process.env.BITRIX_CLIENT_SECRET,
-                code: code
+                code: code,
+                redirect_uri: 'https://bitrixbot-spr9.onrender.com/install'
             }
         });
 
-        const { access_token, refresh_token } = tokenResponse.data;
-        console.log('✅ Access token получен');
+        const { access_token, refresh_token, domain } = tokenResponse.data;
+        console.log('✅ Access token получен для домена:', domain);
 
         // Регистрируем бота через REST API
         const botResponse = await axios.post(`https://${domain}/rest/imbot.register`, {
             CODE: 'time.tracker.bot',
             TYPE: 'H',
-            AUTH: access_token
+            EVENT_MESSAGE_ADD: 'https://bitrixbot-spr9.onrender.com/imbot',
+            EVENT_WELCOME_MESSAGE: 'https://bitrixbot-spr9.onrender.com/imbot',
+            EVENT_BOT_DELETE: 'https://bitrixbot-spr9.onrender.com/imbot',
+            PROPERTIES: {
+                NAME: 'Учет времени',
+                COLOR: 'GREEN',
+                WORK_POSITION: 'Бот для учета рабочего времени сотрудников'
+            }
+        }, {
+            params: { auth: access_token }
         });
 
         console.log('✅ Бот зарегистрирован:', botResponse.data);
@@ -143,10 +154,18 @@ app.post('/imbot', async (req, res) => {
     try {
         console.log('🤖 Webhook received:', JSON.stringify(req.body, null, 2));
         
-        const { data, event } = req.body;
+        const { data, event, auth } = req.body;
         
         if (event === 'ONIMBOTMESSAGEADD') {
-            await handleBotMessage(data);
+            await handleBotMessage(data, auth);
+        } else if (event === 'ONAPPINSTALL') {
+            // Обработка установки приложения
+            await handleAppInstall(data, auth);
+        } else if (event === 'ONIMBOTJOINCHAT') {
+            // Приветственное сообщение
+            await handleWelcomeMessage(data, auth);
+        } else if (event === 'ONIMBOTDELETE') {
+            console.log('🗑️ Бот удален');
         }
         
         res.json({ result: 'ok' });
@@ -157,33 +176,88 @@ app.post('/imbot', async (req, res) => {
     }
 });
 
-// Обработчик сообщений
-async function handleBotMessage(data) {
+// Обработчик установки приложения
+async function handleAppInstall(data, auth) {
+    try {
+        const botResponse = await axios.post(`https://${auth.domain}/rest/imbot.register`, {
+            CODE: 'time.tracker.bot',
+            TYPE: 'H',
+            EVENT_MESSAGE_ADD: 'https://bitrixbot-spr9.onrender.com/imbot',
+            EVENT_WELCOME_MESSAGE: 'https://bitrixbot-spr9.onrender.com/imbot',
+            EVENT_BOT_DELETE: 'https://bitrixbot-spr9.onrender.com/imbot',
+            PROPERTIES: {
+                NAME: 'Учет времени',
+                COLOR: 'GREEN',
+                WORK_POSITION: 'Бот для учета рабочего времени сотрудников'
+            }
+        }, {
+            params: { auth: auth.access_token }
+        });
+        
+        console.log('✅ Бот зарегистрирован при установке:', botResponse.data);
+        
+    } catch (error) {
+        console.error('❌ Bot registration error:', error.response?.data || error.message);
+    }
+}
+
+// Приветственное сообщение
+async function handleWelcomeMessage(data, auth) {
     try {
         const { PARAMS } = data;
-        const { BOT_ID, DIALOG_ID, MESSAGE, FROM_USER_ID } = PARAMS;
+        const { DIALOG_ID } = PARAMS;
+        
+        const welcomeMessage = `🤖 Добро пожаловать в бот учета рабочего времени!
+
+Для работы используйте команды:
+📍 "пришел" - отметить приход в офис
+🚪 "ушел" - отметить уход из офиса  
+📊 "статус" - посмотреть сегодняшние отметки
+❓ "помощь" - справка по командам
+
+Для отметок требуется отправка геолокации через скрепку 📎`;
+        
+        await axios.post(`https://${auth.domain}/rest/imbot.message.add`, {
+            DIALOG_ID: DIALOG_ID,
+            MESSAGE: welcomeMessage
+        }, {
+            params: { auth: auth.access_token }
+        });
+        
+        console.log('✅ Приветственное сообщение отправлено');
+        
+    } catch (error) {
+        console.error('❌ Welcome message error:', error);
+    }
+}
+
+// Обработчик сообщений
+async function handleBotMessage(data, auth) {
+    try {
+        const { PARAMS } = data;
+        const { BOT_ID, DIALOG_ID, MESSAGE, FROM_USER_ID, ATTACH } = PARAMS;
         
         console.log('💬 Message from user:', FROM_USER_ID, MESSAGE);
         
         const cleanMessage = MESSAGE.toLowerCase().trim();
+        
+        // Проверка геолокации
+        if (ATTACH && ATTACH[0] && ATTACH[0].MESSAGE && ATTACH[0].MESSAGE.includes('LOCATION')) {
+            await handleLocation(FROM_USER_ID, cleanMessage, ATTACH[0], BOT_ID, DIALOG_ID, auth);
+            return;
+        }
+        
         let response = '';
         
         switch (cleanMessage) {
             case 'пришел':
-                response = `📍 Для отметки прихода отправьте ваше местоположение через скрепку 📎`;
-                break;
-                
             case 'ушел':
-                response = `🚪 Для отметки ухода отправьте ваше местоположение через скрепку 📎`;
+                response = `📍 Для отметки "${cleanMessage}" отправьте ваше местоположение через скрепку 📎`;
                 break;
                 
             case 'статус':
-                response = `📊 *Ваш статус за сегодня:*
-
-✅ Пришел: не отмечен
-✅ Ушел: не отмечен
-
-📍 Используйте команду "пришел" для отметки`;
+                const attendance = await getTodayAttendance(FROM_USER_ID);
+                response = await formatStatusMessage(FROM_USER_ID, attendance);
                 break;
                 
             case 'помощь':
@@ -196,30 +270,116 @@ async function handleBotMessage(data) {
 📊 статус - посмотреть отметки
 ❓ помощь - эта справка
 
-*Для отметок требуется отправка геолокации!*`;
+*Для отметок требуется отправка геолокации через скрепку 📎*`;
                 break;
                 
             default:
                 response = `❓ Не понимаю команду. Напишите "помощь" для списка команд`;
         }
         
-        // Отправляем ответ
-        await sendBotMessage(BOT_ID, DIALOG_ID, response);
+        await sendBotMessage(BOT_ID, DIALOG_ID, response, auth);
         
     } catch (error) {
         console.error('❌ Message handling error:', error);
     }
 }
 
-// Отправка сообщения ботом
-async function sendBotMessage(botId, dialogId, message) {
+// Обработка геолокации
+async function handleLocation(userId, messageType, attach, botId, dialogId, auth) {
     try {
-        const url = `https://${process.env.BITRIX_DOMAIN}/rest/imbot.message.add`;
+        // Парсим координаты из attachment
+        const locationMatch = attach.MESSAGE.match(/LOCATION:([0-9.-]+);([0-9.-]+)/);
+        if (!locationMatch) {
+            await sendBotMessage(botId, dialogId, '❌ Не удалось определить местоположение', auth);
+            return;
+        }
+        
+        const lat = parseFloat(locationMatch[1]);
+        const lon = parseFloat(locationMatch[2]);
+        
+        console.log(`📍 Координаты пользователя ${userId}: ${lat}, ${lon}`);
+        
+        // Проверяем, находится ли пользователь в офисе
+        const inOffice = checkOfficeLocation(lat, lon);
+        
+        let response = '';
+        
+        if (messageType === 'пришел') {
+            await markAttendance(userId, 'in', lat, lon, inOffice);
+            response = inOffice ? 
+                '✅ Приход успешно отмечен! Добро пожаловать в офис!' :
+                '⚠️ Вы отметили приход, но находитесь вне офиса';
+        } else if (messageType === 'ушел') {
+            await markAttendance(userId, 'out', lat, lon, inOffice);
+            response = '✅ Уход успешно отмечен! Хорошего вечера!';
+        } else {
+            response = '❌ Для отметки прихода/ухода используйте команды "пришел" или "ушел" с геолокацией';
+        }
+        
+        await sendBotMessage(botId, dialogId, response, auth);
+        
+    } catch (error) {
+        console.error('❌ Location handling error:', error);
+        await sendBotMessage(botId, dialogId, '❌ Ошибка при обработке местоположения', auth);
+    }
+}
+
+// Форматирование сообщения статуса
+async function formatStatusMessage(userId, attendance) {
+    if (!attendance || attendance.length === 0) {
+        return `📊 *Ваш статус за сегодня:*
+
+✅ Пришел: не отмечен
+✅ Ушел: не отмечен
+
+📍 Используйте команду "пришел" для отметки`;
+    }
+    
+    let message = `📊 *Ваши отметки за сегодня:*\n\n`;
+    
+    attendance.forEach(record => {
+        const time = new Date(record.timestamp).toLocaleTimeString('ru-RU', { 
+            hour: '2-digit', 
+            minute: '2-digit' 
+        });
+        const type = record.type === 'in' ? '📍 Пришел' : '🚪 Ушел';
+        const location = record.in_office ? '(в офисе)' : '(вне офиса)';
+        
+        message += `${type}: ${time} ${location}\n`;
+    });
+    
+    return message;
+}
+
+// Проверка нахождения в офисе
+function checkOfficeLocation(lat, lon) {
+    const officeLat = parseFloat(process.env.OFFICE_LAT);
+    const officeLon = parseFloat(process.env.OFFICE_LON);
+    const radius = parseFloat(process.env.OFFICE_RADIUS);
+    
+    // Простая проверка расстояния (можно улучшить)
+    const distance = Math.sqrt(
+        Math.pow(lat - officeLat, 2) + Math.pow(lon - officeLon, 2)
+    ) * 111; // приблизительно км
+    
+    const inOffice = distance <= (radius / 1000); // радиус в метрах
+    
+    console.log(`📍 Проверка офиса: расстояние ${(distance * 1000).toFixed(0)}м, радиус ${radius}м, в офисе: ${inOffice}`);
+    
+    return inOffice;
+}
+
+// Отправка сообщения ботом
+async function sendBotMessage(botId, dialogId, message, auth) {
+    try {
+        const url = `https://${auth.domain}/rest/imbot.message.add`;
         
         await axios.post(url, {
             BOT_ID: botId,
             DIALOG_ID: dialogId,
             MESSAGE: message
+        }, {
+            params: { auth: auth.access_token }
         });
         
         console.log('✅ Message sent successfully');
