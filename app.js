@@ -1,7 +1,6 @@
 require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
-const { markAttendance, getTodayAttendance } = require('./database');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -10,6 +9,7 @@ app.use(express.json());
 
 // Главная страница
 app.get('/', (req, res) => {
+    console.log('📍 Главная страница запрошена');
     res.send(`
         <!DOCTYPE html>
         <html>
@@ -47,15 +47,21 @@ app.get('/', (req, res) => {
 
 // Страница установки через OAuth
 app.get('/install', async (req, res) => {
+    console.log('📥 Install route called');
     const { code } = req.query;
     
     if (!code) {
+        console.log('🔐 No code - redirecting to OAuth');
         // Первый шаг - перенаправляем на авторизацию
-        const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent('https://bitrixbot-spr9.onrender.com/install')}`;
+        const redirectUri = 'https://bitrixbot-spr9.onrender.com/install';
+        const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`;
+        console.log('🔗 Redirect to:', authUrl);
         return res.redirect(authUrl);
     }
     
     try {
+        console.log('🔄 Processing OAuth callback with code');
+        
         // Второй шаг - получаем access token
         const tokenUrl = 'https://oauth.bitrix.info/oauth/token/';
         const tokenResponse = await axios.post(tokenUrl, null, {
@@ -176,6 +182,17 @@ app.post('/imbot', async (req, res) => {
     }
 });
 
+// GET для /imbot (для проверки)
+app.get('/imbot', (req, res) => {
+    console.log('🔍 GET request to /imbot');
+    res.json({ 
+        status: 'active', 
+        message: 'Bot webhook is ready for POST requests',
+        timestamp: new Date().toISOString(),
+        note: 'This endpoint should receive POST requests from Bitrix24'
+    });
+});
+
 // Обработчик установки приложения
 async function handleAppInstall(data, auth) {
     try {
@@ -241,23 +258,24 @@ async function handleBotMessage(data, auth) {
         
         const cleanMessage = MESSAGE.toLowerCase().trim();
         
-        // Проверка геолокации
-        if (ATTACH && ATTACH[0] && ATTACH[0].MESSAGE && ATTACH[0].MESSAGE.includes('LOCATION')) {
-            await handleLocation(FROM_USER_ID, cleanMessage, ATTACH[0], BOT_ID, DIALOG_ID, auth);
-            return;
-        }
-        
         let response = '';
         
         switch (cleanMessage) {
             case 'пришел':
+                response = `📍 Для отметки прихода отправьте ваше местоположение через скрепку 📎`;
+                break;
+                
             case 'ушел':
-                response = `📍 Для отметки "${cleanMessage}" отправьте ваше местоположение через скрепку 📎`;
+                response = `🚪 Для отметки ухода отправьте ваше местоположение через скрепку 📎`;
                 break;
                 
             case 'статус':
-                const attendance = await getTodayAttendance(FROM_USER_ID);
-                response = await formatStatusMessage(FROM_USER_ID, attendance);
+                response = `📊 *Ваш статус за сегодня:*
+
+✅ Пришел: не отмечен
+✅ Ушел: не отмечен
+
+📍 Используйте команду "пришел" для отметки`;
                 break;
                 
             case 'помощь':
@@ -284,91 +302,6 @@ async function handleBotMessage(data, auth) {
     }
 }
 
-// Обработка геолокации
-async function handleLocation(userId, messageType, attach, botId, dialogId, auth) {
-    try {
-        // Парсим координаты из attachment
-        const locationMatch = attach.MESSAGE.match(/LOCATION:([0-9.-]+);([0-9.-]+)/);
-        if (!locationMatch) {
-            await sendBotMessage(botId, dialogId, '❌ Не удалось определить местоположение', auth);
-            return;
-        }
-        
-        const lat = parseFloat(locationMatch[1]);
-        const lon = parseFloat(locationMatch[2]);
-        
-        console.log(`📍 Координаты пользователя ${userId}: ${lat}, ${lon}`);
-        
-        // Проверяем, находится ли пользователь в офисе
-        const inOffice = checkOfficeLocation(lat, lon);
-        
-        let response = '';
-        
-        if (messageType === 'пришел') {
-            await markAttendance(userId, 'in', lat, lon, inOffice);
-            response = inOffice ? 
-                '✅ Приход успешно отмечен! Добро пожаловать в офис!' :
-                '⚠️ Вы отметили приход, но находитесь вне офиса';
-        } else if (messageType === 'ушел') {
-            await markAttendance(userId, 'out', lat, lon, inOffice);
-            response = '✅ Уход успешно отмечен! Хорошего вечера!';
-        } else {
-            response = '❌ Для отметки прихода/ухода используйте команды "пришел" или "ушел" с геолокацией';
-        }
-        
-        await sendBotMessage(botId, dialogId, response, auth);
-        
-    } catch (error) {
-        console.error('❌ Location handling error:', error);
-        await sendBotMessage(botId, dialogId, '❌ Ошибка при обработке местоположения', auth);
-    }
-}
-
-// Форматирование сообщения статуса
-async function formatStatusMessage(userId, attendance) {
-    if (!attendance || attendance.length === 0) {
-        return `📊 *Ваш статус за сегодня:*
-
-✅ Пришел: не отмечен
-✅ Ушел: не отмечен
-
-📍 Используйте команду "пришел" для отметки`;
-    }
-    
-    let message = `📊 *Ваши отметки за сегодня:*\n\n`;
-    
-    attendance.forEach(record => {
-        const time = new Date(record.timestamp).toLocaleTimeString('ru-RU', { 
-            hour: '2-digit', 
-            minute: '2-digit' 
-        });
-        const type = record.type === 'in' ? '📍 Пришел' : '🚪 Ушел';
-        const location = record.in_office ? '(в офисе)' : '(вне офиса)';
-        
-        message += `${type}: ${time} ${location}\n`;
-    });
-    
-    return message;
-}
-
-// Проверка нахождения в офисе
-function checkOfficeLocation(lat, lon) {
-    const officeLat = parseFloat(process.env.OFFICE_LAT);
-    const officeLon = parseFloat(process.env.OFFICE_LON);
-    const radius = parseFloat(process.env.OFFICE_RADIUS);
-    
-    // Простая проверка расстояния (можно улучшить)
-    const distance = Math.sqrt(
-        Math.pow(lat - officeLat, 2) + Math.pow(lon - officeLon, 2)
-    ) * 111; // приблизительно км
-    
-    const inOffice = distance <= (radius / 1000); // радиус в метрах
-    
-    console.log(`📍 Проверка офиса: расстояние ${(distance * 1000).toFixed(0)}м, радиус ${radius}м, в офисе: ${inOffice}`);
-    
-    return inOffice;
-}
-
 // Отправка сообщения ботом
 async function sendBotMessage(botId, dialogId, message, auth) {
     try {
@@ -389,21 +322,31 @@ async function sendBotMessage(botId, dialogId, message, auth) {
     }
 }
 
-// GET для проверки
-app.get('/imbot', (req, res) => {
-    res.json({ 
-        status: 'active', 
-        message: 'Bot webhook is ready',
-        timestamp: new Date().toISOString()
-    });
-});
-
 // Статус
 app.get('/status', (req, res) => {
     res.json({ 
         status: 'active', 
         timestamp: new Date().toISOString(),
-        service: 'Bitrix24 Time Tracker Bot'
+        service: 'Bitrix24 Time Tracker Bot',
+        routes: {
+            main: '/',
+            install: '/install',
+            webhook: '/imbot (POST)',
+            status: '/status'
+        }
+    });
+});
+
+// Дебаг роут
+app.get('/debug', (req, res) => {
+    res.json({
+        message: 'Debug endpoint',
+        environment: {
+            BITRIX_DOMAIN: process.env.BITRIX_DOMAIN || 'not set',
+            BITRIX_CLIENT_ID: process.env.BITRIX_CLIENT_ID ? 'set' : 'not set',
+            PORT: process.env.PORT
+        },
+        timestamp: new Date().toISOString()
     });
 });
 
@@ -412,4 +355,5 @@ app.listen(port, '0.0.0.0', () => {
     console.log(`📍 Main: https://bitrixbot-spr9.onrender.com`);
     console.log(`📥 Install: https://bitrixbot-spr9.onrender.com/install`);
     console.log(`🤖 Webhook: https://bitrixbot-spr9.onrender.com/imbot`);
+    console.log(`🔧 Debug: https://bitrixbot-spr9.onrender.com/debug`);
 });
