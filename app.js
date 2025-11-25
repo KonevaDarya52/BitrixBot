@@ -6,275 +6,242 @@ const app = express();
 const port = process.env.PORT || 10000;
 
 const APP_DOMAIN = 'bitrixbot-bnnd.onrender.com';
-const REDIRECT_URI = `https://${APP_DOMAIN}/install`;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Middleware для логирования
+// Улучшенное логирование
 app.use((req, res, next) => {
+    console.log('=== 🚨 NEW REQUEST ===');
     console.log(`📍 ${new Date().toISOString()} ${req.method} ${req.url}`);
+    console.log('📦 Query:', JSON.stringify(req.query, null, 2));
+    console.log('📦 Headers:', JSON.stringify(req.headers, null, 2));
+    console.log('📦 Body:', JSON.stringify(req.body, null, 2));
     next();
 });
 
-// Главная страница
+// ТЕСТ 1: Главная страница - проверка базовой работы
 app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Bitrix24 Time Bot</title>
+            <title>Diagnostic Tool</title>
             <style>
-                body { font-family: Arial, sans-serif; padding: 50px; text-align: center; }
-                .button { background: #2d8cff; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 10px; }
+                body { font-family: Arial, sans-serif; padding: 30px; }
+                .test { background: #f8f9fa; padding: 20px; margin: 10px 0; border-radius: 5px; }
+                .button { background: #007bff; color: white; padding: 10px 15px; text-decoration: none; border-radius: 3px; margin: 5px; display: inline-block; }
             </style>
         </head>
         <body>
-            <h1>🤖 Bitrix24 Time Tracker Bot</h1>
-            <p>Official implementation according to Bitrix24 documentation</p>
-            <a href="/install" class="button">🚀 Install Bot</a>
+            <h1>🔧 Diagnostic Tests</h1>
+            
+            <div class="test">
+                <h3>Тест 1: Базовая работа сервера</h3>
+                <p>Если вы видите эту страницу - сервер работает ✅</p>
+                <a href="/test-oauth" class="button">Тест OAuth</a>
+                <a href="/test-bot" class="button">Тест Bot API</a>
+                <a href="/env-check" class="button">Проверка переменных</a>
+            </div>
+
+            <div class="test">
+                <h3>Тест 2: OAuth установка</h3>
+                <a href="/install-simple" class="button">Простая установка</a>
+                <a href="/install-debug" class="button">Установка с дебагом</a>
+            </div>
+
+            <div class="test">
+                <h3>Тест 3: Вебхуки</h3>
+                <a href="/webhook-test" class="button">Тест вебхука</a>
+            </div>
         </body>
         </html>
     `);
 });
 
-// Установка приложения - СТРОГО по документации
-app.get('/install', async (req, res) => {
-    console.log('=== BITRIX24 OFFICIAL INSTALLATION PROCESS ===');
-    
-    const { code, domain } = req.query;
+// ТЕСТ 2: Проверка переменных окружения
+app.get('/env-check', (req, res) => {
+    const envCheck = {
+        BITRIX_DOMAIN: process.env.BITRIX_DOMAIN,
+        BITRIX_CLIENT_ID: process.env.BITRIX_CLIENT_ID,
+        BITRIX_CLIENT_SECRET: process.env.BITRIX_CLIENT_SECRET ? '✅ SET' : '❌ MISSING',
+        PORT: process.env.PORT,
+        APP_DOMAIN: APP_DOMAIN,
+        status: 'running'
+    };
 
-    // Шаг 1: Если нет кода - редирект на авторизацию
+    console.log('🔍 Environment Check:', envCheck);
+    
+    res.json(envCheck);
+});
+
+// ТЕСТ 3: Простой OAuth редирект (без обработки callback)
+app.get('/install-simple', (req, res) => {
+    console.log('🔐 Simple OAuth redirect test');
+    
+    const redirectUri = `https://${APP_DOMAIN}/install-callback`;
+    const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`;
+    
+    console.log('🔗 Redirect to:', authUrl);
+    
+    res.send(`
+        <div style="padding: 20px;">
+            <h2>🔐 Тест OAuth редиректа</h2>
+            <p><strong>Redirect URI:</strong> ${redirectUri}</p>
+            <p><a href="${authUrl}" style="background: #007bff; color: white; padding: 10px 15px; text-decoration: none; border-radius: 3px;">Начать OAuth</a></p>
+            <p><small>После авторизации Bitrix24 перенаправит на /install-callback</small></p>
+        </div>
+    `);
+});
+
+// ТЕСТ 4: Callback endpoint для теста
+app.get('/install-callback', (req, res) => {
+    console.log('🔄 OAuth Callback Received (TEST)');
+    console.log('📦 Full query:', req.query);
+    
+    res.send(`
+        <div style="padding: 20px;">
+            <h2>✅ OAuth Callback получен!</h2>
+            <h3>Параметры:</h3>
+            <pre>${JSON.stringify(req.query, null, 2)}</pre>
+            <p><strong>Важно:</strong> Посмотрите в консоли Render.com куда именно Bitrix24 делает редирект</p>
+        </div>
+    `);
+});
+
+// ТЕСТ 5: Расширенная установка с дебагом
+app.get('/install-debug', async (req, res) => {
+    const { code, domain, auth } = req.query;
+    
+    console.log('=== 🧪 DEBUG INSTALLATION ===');
+    console.log('🔑 Code:', code);
+    console.log('🏢 Domain:', domain);
+    console.log('🔐 Auth:', auth);
+    console.log('📦 All params:', req.query);
+
+    // Если нет кода - начинаем OAuth
     if (!code) {
-        console.log('🔐 Step 1: Redirecting to OAuth');
-        const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
-        console.log('🔗 OAuth URL:', authUrl);
+        const redirectUri = `https://${APP_DOMAIN}/install-debug`;
+        const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(redirectUri)}`;
+        
+        console.log('🔗 Starting OAuth flow to:', authUrl);
+        
         return res.redirect(authUrl);
     }
 
-    console.log('🔄 Step 2: OAuth callback received');
-    console.log('🔑 Code:', code);
-    console.log('🏢 Domain:', domain);
+    // Если есть код - показываем информацию
+    res.send(`
+        <div style="padding: 20px;">
+            <h2>🧪 Debug Information</h2>
+            
+            <div style="background: #e9ecef; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                <h3>OAuth Parameters:</h3>
+                <pre>${JSON.stringify(req.query, null, 2)}</pre>
+            </div>
 
-    try {
-        // Шаг 2: Получение access token - СТРОГО по документации
-        console.log('📥 Getting access token...');
-        const tokenResponse = await axios.post('https://oauth.bitrix.info/oauth/token/', null, {
-            params: {
-                grant_type: 'authorization_code',
-                client_id: process.env.BITRIX_CLIENT_ID,
-                client_secret: process.env.BITRIX_CLIENT_SECRET,
-                code: code
-            }
-        });
+            <div style="background: #d4edda; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                <h3>✅ Success!</h3>
+                <p>OAuth callback получен на endpoint: <strong>/install-debug</strong></p>
+                <p>Код авторизации: ${code ? '✅ Получен' : '❌ Отсутствует'}</p>
+                <p>Домен: ${domain || 'Не указан'}</p>
+            </div>
 
-        const { access_token, expires_in, member_id } = tokenResponse.data;
-        console.log('✅ Access token received');
-        console.log('👤 Member ID:', member_id);
+            <div style="background: #fff3cd; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                <h3>🔍 Next Steps:</h3>
+                <p>1. Проверьте логи в Render.com - увидите полные параметры</p>
+                <p>2. Посмотрите на какой endpoint Bitrix24 сделал редирект</p>
+                <p>3. Сравните с настройками в Bitrix24 Marketplace</p>
+            </div>
 
-        // Шаг 3: Регистрация бота - СТРОГО по документации
-        console.log('🤖 Registering bot...');
-        
-        // Параметры строго как в документации
-        const botParams = {
-            CODE: 'official_time_bot', // Уникальный код бота
-            TYPE: 'H', // Human bot type
-            EVENT_MESSAGE_ADD: `https://${APP_DOMAIN}/imbot`,
-            EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`, 
-            EVENT_BOT_DELETE: `https://${APP_DOMAIN}/imbot`,
-            PROPERTIES: {
-                NAME: 'Official Time Bot', // Имя бота
-                COLOR: 'AQUA', // Цвет как в документации
-                EMAIL: '', // Необязательно
-                PERSONAL_BIRTHDAY: '', // Необязательно  
-                WORK_POSITION: 'Time Tracking Assistant',
-                PERSONAL_WWW: '',
-                PERSONAL_GENDER: '',
-                PERSONAL_PHOTO: '' // Можно добавить позже
-            }
-        };
-
-        console.log('📦 Bot registration params:', JSON.stringify(botParams, null, 2));
-
-        const botResponse = await axios.post(
-            `https://${domain}/rest/imbot.register`,
-            botParams,
-            { params: { auth: access_token } }
-        );
-
-        console.log('✅ Bot registered successfully!');
-        console.log('📦 Bot response:', botResponse.data);
-
-        // Успешная установка
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Installation Complete</title>
-                <style>
-                    body { font-family: Arial, sans-serif; padding: 50px; text-align: center; background: #d4edda; }
-                    .success { background: white; padding: 30px; border-radius: 10px; max-width: 600px; margin: 0 auto; }
-                </style>
-            </head>
-            <body>
-                <div class="success">
-                    <h1 style="color: #155724;">🎉 Installation Complete!</h1>
-                    <p><strong>Bot "Official Time Bot" has been successfully installed</strong></p>
-                    <p>You can now find the bot in your Bitrix24 chats</p>
-                    <p><a href="https://${domain}" style="background: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Open Bitrix24</a></p>
-                </div>
-            </body>
-            </html>
-        `);
-
-    } catch (error) {
-        console.error('❌ INSTALLATION FAILED:');
-        console.error('Error:', error.message);
-        
-        if (error.response) {
-            console.error('Status:', error.response.status);
-            console.error('Data:', error.response.data);
-            console.error('URL:', error.response.config?.url);
-        }
-
-        let errorMessage = 'Unknown error';
-        if (error.response?.data?.error_description) {
-            errorMessage = error.response.data.error_description;
-        } else if (error.response?.data) {
-            errorMessage = JSON.stringify(error.response.data);
-        }
-
-        res.send(`
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <title>Installation Failed</title>
-                <style>
-                    body { font-family: Arial, sans-serif; padding: 50px; text-align: center; background: #f8d7da; }
-                    .error { background: white; padding: 30px; border-radius: 10px; max-width: 600px; margin: 0 auto; }
-                </style>
-            </head>
-            <body>
-                <div class="error">
-                    <h1 style="color: #721c24;">❌ Installation Failed</h1>
-                    <p><strong>Error:</strong> ${errorMessage}</p>
-                    <p><a href="/install" style="background: #dc3545; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Try Again</a></p>
-                </div>
-            </body>
-            </html>
-        `);
-    }
+            <a href="/" style="background: #6c757d; color: white; padding: 10px 15px; text-decoration: none; border-radius: 3px;">На главную</a>
+        </div>
+    `);
 });
 
-// Вебхук для бота - СТРОГО по документации
-app.post('/imbot', async (req, res) => {
-    console.log('🤖 WEBHOOK RECEIVED');
+// ТЕСТ 6: Эмуляция вебхука от Bitrix24
+app.get('/webhook-test', (req, res) => {
+    res.send(`
+        <div style="padding: 20px;">
+            <h2>🤖 Тест вебхука</h2>
+            <p>Endpoint: <strong>POST https://${APP_DOMAIN}/imbot</strong></p>
+            
+            <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                <h4>Пример данных вебхука:</h4>
+                <pre>
+{
+  "event": "ONIMBOTMESSAGEADD",
+  "data": {
+    "PARAMS": {
+      "MESSAGE": "test",
+      "DIALOG_ID": "chat123", 
+      "BOT_ID": "bot123",
+      "FROM_USER_ID": "user123"
+    }
+  },
+  "auth": {
+    "domain": "${process.env.BITRIX_DOMAIN}",
+    "access_token": "test_token"
+  }
+}
+                </pre>
+            </div>
+            
+            <p>Используйте Postman или curl для тестирования POST запросов</p>
+        </div>
+    `);
+});
+
+// ТЕСТ 7: Универсальный обработчик OAuth (ловим все)
+app.get('*', (req, res) => {
+    const { code, domain, auth } = req.query;
     
-    try {
-        const { event, data, auth } = req.body;
+    // Если есть OAuth параметры - логируем куда пришел запрос
+    if (code || auth) {
+        console.log('=== 🎯 OAUTH DETECTED ON UNEXPECTED ENDPOINT ===');
+        console.log('🔗 Path:', req.path);
+        console.log('🔑 Code:', code);
+        console.log('🏢 Domain:', domain);
+        console.log('🔐 Auth:', auth);
+        console.log('📦 Full URL:', req.originalUrl);
         
-        console.log(`🔔 Event: ${event}`);
-        console.log('📦 Data:', JSON.stringify(data, null, 2));
-
-        // Обработка событий строго по документации
-        if (event === 'ONIMBOTMESSAGEADD') {
-            await handleMessage(data, auth);
-        } else if (event === 'ONIMBOTDELETE') {
-            console.log('🗑️ Bot was deleted');
-        } else if (event === 'ONIMBOTJOINCHAT') {
-            await handleWelcome(data, auth);
-        }
-
-        // ВСЕГДА возвращаем { result: 'ok' }
-        res.json({ result: 'ok' });
-        
-    } catch (error) {
-        console.error('❌ Webhook error:', error);
-        // ВСЕГДА возвращаем { result: 'ok' } даже при ошибках
-        res.json({ result: 'ok' });
+        res.send(`
+            <div style="padding: 20px;">
+                <h2>🎯 OAuth Callback Detected</h2>
+                <p><strong>Endpoint:</strong> ${req.path}</p>
+                <p><strong>Parameters:</strong></p>
+                <pre>${JSON.stringify(req.query, null, 2)}</pre>
+                
+                <div style="background: #f8d7da; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                    <h3>⚠️ Внимание!</h3>
+                    <p>Bitrix24 перенаправляет OAuth на: <strong>${req.path}</strong></p>
+                    <p>Это значит что в настройках приложения указан неправильный URL установки!</p>
+                </div>
+            </div>
+        `);
+        return;
     }
-});
-
-// Обработчик сообщений - простой как в документации
-async function handleMessage(data, auth) {
-    try {
-        const { PARAMS } = data;
-        const { MESSAGE, DIALOG_ID, BOT_ID } = PARAMS;
-        
-        console.log(`💬 Message: "${MESSAGE}" in dialog ${DIALOG_ID}`);
-        
-        let response = 'Hello! I am your time tracking bot. Send me any message.';
-        
-        if (MESSAGE) {
-            const msg = MESSAGE.toLowerCase().trim();
-            if (msg === 'hello' || msg === 'hi' || msg === 'привет') {
-                response = 'Hello! How can I help you today?';
-            } else if (msg === 'time' || msg === 'время') {
-                response = `Current time: ${new Date().toLocaleString('ru-RU')}`;
-            }
-        }
-        
-        // Отправка сообщения строго по документации
-        await axios.post(
-            `https://${auth.domain}/rest/imbot.message.add`,
-            {
-                BOT_ID: BOT_ID,
-                DIALOG_ID: DIALOG_ID,
-                MESSAGE: response
-            },
-            { params: { auth: auth.access_token } }
-        );
-        
-        console.log('✅ Response sent');
-        
-    } catch (error) {
-        console.error('❌ Message handling error:', error.message);
-    }
-}
-
-// Приветственное сообщение
-async function handleWelcome(data, auth) {
-    try {
-        const { PARAMS } = data;
-        const { DIALOG_ID, BOT_ID } = PARAMS;
-        
-        console.log('👋 Sending welcome message');
-        
-        await axios.post(
-            `https://${auth.domain}/rest/imbot.message.add`,
-            {
-                BOT_ID: BOT_ID,
-                DIALOG_ID: DIALOG_ID,
-                MESSAGE: '👋 Welcome! I am your time tracking assistant. Send me "hello" to start.'
-            },
-            { params: { auth: auth.access_token } }
-        );
-        
-    } catch (error) {
-        console.error('❌ Welcome error:', error.message);
-    }
-}
-
-// GET для тестирования
-app.get('/imbot', (req, res) => {
-    res.json({ 
-        status: 'active', 
-        message: 'Webhook endpoint ready for POST requests from Bitrix24',
-        timestamp: new Date().toISOString()
+    
+    // Обычный 404
+    res.status(404).json({
+        error: 'Endpoint not found',
+        path: req.path,
+        available_endpoints: [
+            '/', '/env-check', '/install-simple', '/install-debug', '/webhook-test'
+        ]
     });
 });
 
-// Статус
-app.get('/status', (req, res) => {
-    res.json({ 
-        status: 'running',
-        implementation: 'Official Bitrix24 Documentation',
-        timestamp: new Date().toISOString()
-    });
+// Обработчик вебхуков
+app.post('/imbot', (req, res) => {
+    console.log('🤖 Webhook received at /imbot');
+    console.log('📦 Body:', JSON.stringify(req.body, null, 2));
+    
+    res.json({ result: 'ok', received: true });
 });
 
 app.listen(port, '0.0.0.0', () => {
-    console.log(`🚀 Server started on port ${port}`);
-    console.log(`📍 Domain: ${APP_DOMAIN}`);
-    console.log(`📖 Following official Bitrix24 documentation`);
+    console.log('🚀 Diagnostic server started');
+    console.log('📍 Domain:', APP_DOMAIN);
+    console.log('🔧 Port:', port);
+    console.log('=== 🧪 READY FOR TESTING ===');
 });
