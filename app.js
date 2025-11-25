@@ -5,17 +5,15 @@ const axios = require('axios');
 const app = express();
 const port = process.env.PORT || 10000;
 
-// Константы
 const APP_DOMAIN = 'bitrixbot-bnnd.onrender.com';
 const REDIRECT_URI = `https://${APP_DOMAIN}/install`;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Логирование всех запросов
+// Middleware для логирования
 app.use((req, res, next) => {
     console.log(`📍 ${new Date().toISOString()} ${req.method} ${req.url}`);
-    console.log('📦 Query:', req.query);
     next();
 });
 
@@ -25,130 +23,84 @@ app.get('/', (req, res) => {
         <!DOCTYPE html>
         <html>
         <head>
-            <title>Бот учета времени</title>
+            <title>Bitrix24 Time Bot</title>
             <style>
-                body { 
-                    font-family: Arial, sans-serif; 
-                    padding: 50px; 
-                    text-align: center; 
-                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                    min-height: 100vh;
-                    margin: 0;
-                }
-                .container {
-                    background: white;
-                    padding: 40px;
-                    border-radius: 15px;
-                    box-shadow: 0 10px 30px rgba(0,0,0,0.2);
-                    max-width: 600px;
-                    margin: 0 auto;
-                }
-                .button {
-                    background: #2d8cff; 
-                    color: white; 
-                    padding: 15px 30px; 
-                    text-decoration: none; 
-                    border-radius: 5px;
-                    display: inline-block;
-                    margin: 20px 0;
-                    font-size: 18px;
-                    font-weight: bold;
-                }
-                .button:hover {
-                    background: #1e6fd9;
-                }
+                body { font-family: Arial, sans-serif; padding: 50px; text-align: center; }
+                .button { background: #2d8cff; color: white; padding: 15px 30px; text-decoration: none; border-radius: 5px; display: inline-block; margin: 10px; }
             </style>
         </head>
         <body>
-            <div class="container">
-                <h1>🤖 Бот учета рабочего времени</h1>
-                <p>Автоматический учет прихода и ухода сотрудников в Bitrix24</p>
-                <a href="/install" class="button">🚀 Установить бота</a>
-                
-                <div style="text-align: left; margin-top: 30px; padding: 20px; background: #f8f9fa; border-radius: 10px;">
-                    <h3>📋 Команды бота:</h3>
-                    <ul>
-                        <li><strong>пришел</strong> - отметить начало рабочего дня</li>
-                        <li><strong>ушел</strong> - отметить конец рабочего дня</li>
-                        <li><strong>статус</strong> - посмотреть сегодняшние отметки</li>
-                        <li><strong>помощь</strong> - показать справку</li>
-                    </ul>
-                </div>
-            </div>
+            <h1>🤖 Bitrix24 Time Tracker Bot</h1>
+            <p>Official implementation according to Bitrix24 documentation</p>
+            <a href="/install" class="button">🚀 Install Bot</a>
         </body>
         </html>
     `);
 });
 
-// Установка приложения
+// Установка приложения - СТРОГО по документации
 app.get('/install', async (req, res) => {
-    console.log('=== 🚀 INSTALL PROCESS STARTED ===');
+    console.log('=== BITRIX24 OFFICIAL INSTALLATION PROCESS ===');
     
     const { code, domain } = req.query;
-    
-    // Если нет кода - редирект на авторизацию
+
+    // Шаг 1: Если нет кода - редирект на авторизацию
     if (!code) {
-        console.log('🔐 No code - starting OAuth flow');
+        console.log('🔐 Step 1: Redirecting to OAuth');
         const authUrl = `https://${process.env.BITRIX_DOMAIN}/oauth/authorize/?client_id=${process.env.BITRIX_CLIENT_ID}&response_type=code&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
-        console.log('🔗 Redirect to OAuth:', authUrl);
+        console.log('🔗 OAuth URL:', authUrl);
         return res.redirect(authUrl);
     }
-    
-    console.log('🔄 Processing OAuth callback');
-    console.log('🔑 Authorization code received');
+
+    console.log('🔄 Step 2: OAuth callback received');
+    console.log('🔑 Code:', code);
     console.log('🏢 Domain:', domain);
 
     try {
-        // 1. Получаем access token
-        console.log('📥 Step 1: Getting access token from OAuth...');
-        const tokenUrl = 'https://oauth.bitrix.info/oauth/token/';
-        
-        const tokenParams = {
-            grant_type: 'authorization_code',
-            client_id: process.env.BITRIX_CLIENT_ID,
-            client_secret: process.env.BITRIX_CLIENT_SECRET,
-            code: code,
-            redirect_uri: REDIRECT_URI
-        };
-
-        console.log('🔑 Token request params:', {
-            client_id: process.env.BITRIX_CLIENT_ID,
-            code_length: code.length,
-            redirect_uri: REDIRECT_URI
+        // Шаг 2: Получение access token - СТРОГО по документации
+        console.log('📥 Getting access token...');
+        const tokenResponse = await axios.post('https://oauth.bitrix.info/oauth/token/', null, {
+            params: {
+                grant_type: 'authorization_code',
+                client_id: process.env.BITRIX_CLIENT_ID,
+                client_secret: process.env.BITRIX_CLIENT_SECRET,
+                code: code
+            }
         });
 
-        const tokenResponse = await axios.post(tokenUrl, null, { params: tokenParams });
-        console.log('✅ Access token received successfully');
-
-        const { access_token, refresh_token, member_id } = tokenResponse.data;
-        console.log('🔑 Access token (first 20 chars):', access_token?.substring(0, 20) + '...');
+        const { access_token, expires_in, member_id } = tokenResponse.data;
+        console.log('✅ Access token received');
         console.log('👤 Member ID:', member_id);
 
-        // 2. Регистрируем бота
-        console.log('📥 Step 2: Registering bot in Bitrix24...');
+        // Шаг 3: Регистрация бота - СТРОГО по документации
+        console.log('🤖 Registering bot...');
         
-        const botData = {
-            CODE: 'time_tracker_bot_v2',
-            TYPE: 'H',
+        // Параметры строго как в документации
+        const botParams = {
+            CODE: 'official_time_bot', // Уникальный код бота
+            TYPE: 'H', // Human bot type
             EVENT_MESSAGE_ADD: `https://${APP_DOMAIN}/imbot`,
-            EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
+            EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`, 
             EVENT_BOT_DELETE: `https://${APP_DOMAIN}/imbot`,
             PROPERTIES: {
-                NAME: 'Учет времени PRO',
-                COLOR: 'GREEN',
-                DESCRIPTION: 'Умный бот для учета рабочего времени сотрудников',
-                WORK_POSITION: 'Помощник по учету времени'
+                NAME: 'Official Time Bot', // Имя бота
+                COLOR: 'AQUA', // Цвет как в документации
+                EMAIL: '', // Необязательно
+                PERSONAL_BIRTHDAY: '', // Необязательно  
+                WORK_POSITION: 'Time Tracking Assistant',
+                PERSONAL_WWW: '',
+                PERSONAL_GENDER: '',
+                PERSONAL_PHOTO: '' // Можно добавить позже
             }
         };
 
-        console.log('🤖 Bot registration data:', JSON.stringify(botData, null, 2));
-        
-        const registerUrl = `https://${domain}/rest/imbot.register`;
-        console.log('🔗 Register URL:', registerUrl);
-        
-        const botResponse = await axios.post(registerUrl, botData, { 
-            params: { auth: access_token } 
-        });
+        console.log('📦 Bot registration params:', JSON.stringify(botParams, null, 2));
+
+        const botResponse = await axios.post(
+            `https://${domain}/rest/imbot.register`,
+            botParams,
+            { params: { auth: access_token } }
+        );
 
         console.log('✅ Bot registered successfully!');
         console.log('📦 Bot response:', botResponse.data);
@@ -158,127 +110,55 @@ app.get('/install', async (req, res) => {
             <!DOCTYPE html>
             <html>
             <head>
-                <title>Установка завершена!</title>
+                <title>Installation Complete</title>
                 <style>
-                    body { 
-                        font-family: Arial, sans-serif; 
-                        padding: 50px; 
-                        text-align: center; 
-                        background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
-                        min-height: 100vh;
-                        margin: 0;
-                    }
-                    .success { 
-                        background: white; 
-                        padding: 40px; 
-                        border-radius: 15px; 
-                        max-width: 600px; 
-                        margin: 0 auto;
-                        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-                    }
-                    .button {
-                        background: #28a745; 
-                        color: white; 
-                        padding: 12px 25px; 
-                        text-decoration: none; 
-                        border-radius: 5px;
-                        display: inline-block;
-                        margin: 10px;
-                    }
+                    body { font-family: Arial, sans-serif; padding: 50px; text-align: center; background: #d4edda; }
+                    .success { background: white; padding: 30px; border-radius: 10px; max-width: 600px; margin: 0 auto; }
                 </style>
             </head>
             <body>
                 <div class="success">
-                    <h1 style="color: #155724;">🎉 Установка завершена!</h1>
-                    <p><strong>Бот "Учет времени PRO" успешно установлен в вашем Bitrix24</strong></p>
-                    
-                    <div style="text-align: left; background: #d4edda; padding: 20px; border-radius: 10px; margin: 20px 0;">
-                        <h3>🚀 Что делать дальше:</h3>
-                        <ol>
-                            <li>Откройте чаты в Bitrix24</li>
-                            <li>Найдите бота "Учет времени PRO"</li>
-                            <li>Начните общение, написав "помощь"</li>
-                        </ol>
-                    </div>
-                    
-                    <div>
-                        <a href="https://${domain}" class="button">📱 Перейти в Bitrix24</a>
-                        <a href="/" class="button" style="background: #6c757d;">🏠 На главную</a>
-                    </div>
+                    <h1 style="color: #155724;">🎉 Installation Complete!</h1>
+                    <p><strong>Bot "Official Time Bot" has been successfully installed</strong></p>
+                    <p>You can now find the bot in your Bitrix24 chats</p>
+                    <p><a href="https://${domain}" style="background: #28a745; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Open Bitrix24</a></p>
                 </div>
             </body>
             </html>
         `);
 
     } catch (error) {
-        console.error('❌ INSTALLATION ERROR:');
-        console.error('Error message:', error.message);
+        console.error('❌ INSTALLATION FAILED:');
+        console.error('Error:', error.message);
         
         if (error.response) {
             console.error('Status:', error.response.status);
             console.error('Data:', error.response.data);
-            console.error('Headers:', error.response.headers);
+            console.error('URL:', error.response.config?.url);
         }
-        
-        let errorDetails = 'Неизвестная ошибка при установке';
-        if (error.response?.data) {
-            errorDetails = typeof error.response.data === 'object' 
-                ? JSON.stringify(error.response.data, null, 2)
-                : error.response.data;
-        } else if (error.message) {
-            errorDetails = error.message;
+
+        let errorMessage = 'Unknown error';
+        if (error.response?.data?.error_description) {
+            errorMessage = error.response.data.error_description;
+        } else if (error.response?.data) {
+            errorMessage = JSON.stringify(error.response.data);
         }
-        
+
         res.send(`
             <!DOCTYPE html>
             <html>
             <head>
-                <title>Ошибка установки</title>
+                <title>Installation Failed</title>
                 <style>
-                    body { 
-                        font-family: Arial, sans-serif; 
-                        padding: 50px; 
-                        text-align: center; 
-                        background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
-                        min-height: 100vh;
-                        margin: 0;
-                    }
-                    .error { 
-                        background: white; 
-                        padding: 40px; 
-                        border-radius: 15px; 
-                        max-width: 600px; 
-                        margin: 0 auto;
-                        box-shadow: 0 10px 30px rgba(0,0,0,0.1);
-                    }
-                    pre { 
-                        background: #f8f9fa; 
-                        padding: 15px; 
-                        border-radius: 5px; 
-                        text-align: left; 
-                        overflow-x: auto;
-                        font-size: 12px;
-                    }
-                    .button {
-                        background: #dc3545; 
-                        color: white; 
-                        padding: 12px 25px; 
-                        text-decoration: none; 
-                        border-radius: 5px;
-                        display: inline-block;
-                        margin: 10px;
-                    }
+                    body { font-family: Arial, sans-serif; padding: 50px; text-align: center; background: #f8d7da; }
+                    .error { background: white; padding: 30px; border-radius: 10px; max-width: 600px; margin: 0 auto; }
                 </style>
             </head>
             <body>
                 <div class="error">
-                    <h1 style="color: #721c24;">❌ Ошибка установки</h1>
-                    <p>Произошла ошибка при установке бота:</p>
-                    <pre>${errorDetails}</pre>
-                    <div style="margin-top: 20px;">
-                        <a href="/install" class="button">🔄 Попробовать снова</a>
-                        <a href="/" class="button" style="background: #6c757d;">🏠 На главную</a>
-                    </div>
+                    <h1 style="color: #721c24;">❌ Installation Failed</h1>
+                    <p><strong>Error:</strong> ${errorMessage}</p>
+                    <p><a href="/install" style="background: #dc3545; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px;">Try Again</a></p>
                 </div>
             </body>
             </html>
@@ -286,130 +166,115 @@ app.get('/install', async (req, res) => {
     }
 });
 
-// Вебхук для бота
+// Вебхук для бота - СТРОГО по документации
 app.post('/imbot', async (req, res) => {
-    console.log('🤖 BOT WEBHOOK RECEIVED');
-    console.log('📦 Full request body:', JSON.stringify(req.body, null, 2));
+    console.log('🤖 WEBHOOK RECEIVED');
     
     try {
         const { event, data, auth } = req.body;
         
-        console.log(`🔔 Event type: ${event}`);
-        
+        console.log(`🔔 Event: ${event}`);
+        console.log('📦 Data:', JSON.stringify(data, null, 2));
+
+        // Обработка событий строго по документации
         if (event === 'ONIMBOTMESSAGEADD') {
-            console.log('💬 Message from user received');
-            
-            if (data && data.PARAMS) {
-                const { MESSAGE, DIALOG_ID, BOT_ID, FROM_USER_ID } = data.PARAMS;
-                console.log(`📝 User ${FROM_USER_ID} wrote: "${MESSAGE}" in dialog ${DIALOG_ID}`);
-                
-                // Простая обработка сообщений
-                let response = '';
-                const cleanMessage = (MESSAGE || '').toLowerCase().trim();
-                
-                switch (cleanMessage) {
-                    case 'пришел':
-                        response = '✅ Отметка прихода зафиксирована! Хорошего рабочего дня!';
-                        break;
-                    case 'ушел':
-                        response = '🚪 Отметка ухода зафиксирована! До завтра!';
-                        break;
-                    case 'помощь':
-                        response = `🤖 Бот учета времени\n\nДоступные команды:\n• "пришел" - отметить приход\n• "ушел" - отметить уход\n• "статус" - посмотреть отметки\n• "помощь" - эта справка`;
-                        break;
-                    case 'статус':
-                        response = '📊 Сегодня у вас нет отметок. Используйте "пришел" и "ушел" для отметки времени.';
-                        break;
-                    default:
-                        response = '❓ Не понимаю команду. Напишите "помощь" для списка команд.';
-                }
-                
-                // Отправляем ответ
-                await axios.post(`https://${auth.domain}/rest/imbot.message.add`, {
-                    BOT_ID: BOT_ID,
-                    DIALOG_ID: DIALOG_ID,
-                    MESSAGE: response
-                }, { 
-                    params: { auth: auth.access_token } 
-                });
-                
-                console.log('✅ Response sent to user');
-            }
+            await handleMessage(data, auth);
+        } else if (event === 'ONIMBOTDELETE') {
+            console.log('🗑️ Bot was deleted');
         } else if (event === 'ONIMBOTJOINCHAT') {
-            console.log('👋 Bot joined chat - sending welcome message');
-            
-            if (data && data.PARAMS) {
-                const { DIALOG_ID, BOT_ID } = data.PARAMS;
-                
-                await axios.post(`https://${auth.domain}/rest/imbot.message.add`, {
-                    BOT_ID: BOT_ID,
-                    DIALOG_ID: DIALOG_ID,
-                    MESSAGE: '🤖 Привет! Я бот для учета рабочего времени. Напишите "помощь" для списка команд.'
-                }, { 
-                    params: { auth: auth.access_token } 
-                });
+            await handleWelcome(data, auth);
+        }
+
+        // ВСЕГДА возвращаем { result: 'ok' }
+        res.json({ result: 'ok' });
+        
+    } catch (error) {
+        console.error('❌ Webhook error:', error);
+        // ВСЕГДА возвращаем { result: 'ok' } даже при ошибках
+        res.json({ result: 'ok' });
+    }
+});
+
+// Обработчик сообщений - простой как в документации
+async function handleMessage(data, auth) {
+    try {
+        const { PARAMS } = data;
+        const { MESSAGE, DIALOG_ID, BOT_ID } = PARAMS;
+        
+        console.log(`💬 Message: "${MESSAGE}" in dialog ${DIALOG_ID}`);
+        
+        let response = 'Hello! I am your time tracking bot. Send me any message.';
+        
+        if (MESSAGE) {
+            const msg = MESSAGE.toLowerCase().trim();
+            if (msg === 'hello' || msg === 'hi' || msg === 'привет') {
+                response = 'Hello! How can I help you today?';
+            } else if (msg === 'time' || msg === 'время') {
+                response = `Current time: ${new Date().toLocaleString('ru-RU')}`;
             }
         }
         
-        res.json({ result: 'ok' });
+        // Отправка сообщения строго по документации
+        await axios.post(
+            `https://${auth.domain}/rest/imbot.message.add`,
+            {
+                BOT_ID: BOT_ID,
+                DIALOG_ID: DIALOG_ID,
+                MESSAGE: response
+            },
+            { params: { auth: auth.access_token } }
+        );
+        
+        console.log('✅ Response sent');
+        
     } catch (error) {
-        console.error('❌ Webhook error:', error.message);
-        res.json({ result: 'error', error: error.message });
+        console.error('❌ Message handling error:', error.message);
     }
-});
+}
+
+// Приветственное сообщение
+async function handleWelcome(data, auth) {
+    try {
+        const { PARAMS } = data;
+        const { DIALOG_ID, BOT_ID } = PARAMS;
+        
+        console.log('👋 Sending welcome message');
+        
+        await axios.post(
+            `https://${auth.domain}/rest/imbot.message.add`,
+            {
+                BOT_ID: BOT_ID,
+                DIALOG_ID: DIALOG_ID,
+                MESSAGE: '👋 Welcome! I am your time tracking assistant. Send me "hello" to start.'
+            },
+            { params: { auth: auth.access_token } }
+        );
+        
+    } catch (error) {
+        console.error('❌ Welcome error:', error.message);
+    }
+}
 
 // GET для тестирования
 app.get('/imbot', (req, res) => {
     res.json({ 
         status: 'active', 
-        message: 'Bot webhook endpoint is ready',
-        timestamp: new Date().toISOString(),
-        note: 'Bitrix24 should send POST requests to this endpoint'
-    });
-});
-
-// Проверка конфигурации
-app.get('/config', (req, res) => {
-    res.json({
-        environment: {
-            BITRIX_DOMAIN: process.env.BITRIX_DOMAIN,
-            BITRIX_CLIENT_ID: process.env.BITRIX_CLIENT_ID,
-            BITRIX_CLIENT_SECRET: process.env.BITRIX_CLIENT_SECRET ? 'SET' : 'NOT SET',
-            PORT: process.env.PORT
-        },
-        app: {
-            DOMAIN: APP_DOMAIN,
-            REDIRECT_URI: REDIRECT_URI
-        },
-        status: 'running'
+        message: 'Webhook endpoint ready for POST requests from Bitrix24',
+        timestamp: new Date().toISOString()
     });
 });
 
 // Статус
 app.get('/status', (req, res) => {
     res.json({ 
-        status: 'active',
-        service: 'Bitrix24 Time Tracker Bot',
-        domain: APP_DOMAIN,
+        status: 'running',
+        implementation: 'Official Bitrix24 Documentation',
         timestamp: new Date().toISOString()
-    });
-});
-
-// Обработчик 404
-app.use('*', (req, res) => {
-    res.status(404).json({ 
-        error: 'Route not found',
-        path: req.originalUrl,
-        method: req.method,
-        available_routes: ['/', '/install', '/imbot', '/status', '/config']
     });
 });
 
 app.listen(port, '0.0.0.0', () => {
     console.log(`🚀 Server started on port ${port}`);
-    console.log(`📍 Main: https://${APP_DOMAIN}`);
-    console.log(`📥 Install: https://${APP_DOMAIN}/install`);
-    console.log(`🤖 Webhook: https://${APP_DOMAIN}/imbot`);
-    console.log(`🔧 Config: https://${APP_DOMAIN}/config`);
-    console.log(`📊 Status: https://${APP_DOMAIN}/status`);
+    console.log(`📍 Domain: ${APP_DOMAIN}`);
+    console.log(`📖 Following official Bitrix24 documentation`);
 });
