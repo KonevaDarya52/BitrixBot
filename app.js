@@ -643,6 +643,37 @@ app.get('/status', async (req, res) => {
 });
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
+
+// Проверяем что реально записано в боте на Битрикс24
+app.get('/check-bot', async (req, res) => {
+    const portal = await getPortal(BITRIX_DOMAIN);
+    if (!portal) return res.json({ ok: false, error: 'Сначала открой /setup' });
+
+    // Получаем детали бота
+    const botInfo = await callBitrix(BITRIX_DOMAIN, portal.access_token, 'imbot.bot.list', {});
+    
+    // Пробуем обновить вебхук бота
+    let updateResult = null;
+    if (portal.bot_id) {
+        updateResult = await callBitrix(BITRIX_DOMAIN, portal.access_token, 'imbot.bot.update', {
+            BOT_ID: portal.bot_id,
+            FIELDS: {
+                EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
+                EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
+                EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
+            }
+        });
+    }
+
+    res.json({
+        bot_id:        portal.bot_id,
+        expected_hook: `https://${APP_DOMAIN}/imbot`,
+        bots_raw:      botInfo?.result || [],
+        update_result: updateResult,
+        message:       updateResult?.result ? '✅ Вебхук обновлён — напиши боту "помощь"' : '❌ Не удалось обновить вебхук'
+    });
+});
+
 app.listen(port, '0.0.0.0', () => {
     console.log(`🚀 Сервер: https://${APP_DOMAIN}`);
     console.log(`📍 Офис: ${OFFICE_LAT}, ${OFFICE_LON} (${OFFICE_RADIUS}м)`);
