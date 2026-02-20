@@ -649,6 +649,34 @@ app.listen(port, '0.0.0.0', () => {
     console.log('=== ✅ READY ===');
 });
 
+
+// Диагностика и починка bot_id
+app.get('/fix-bot', async (req, res) => {
+    const portal = await getPortal('b24-etqwns.bitrix24.ru');
+    if (!portal) return res.json({ ok: false, error: 'Портал не найден' });
+
+    // Получаем список ботов на портале
+    const bots = await callBitrix('b24-etqwns.bitrix24.ru', portal.access_token, 'imbot.bot.list', {});
+    
+    let botId = '';
+    if (bots?.result && bots.result.length > 0) {
+        // Находим нашего бота по коду
+        const ourBot = bots.result.find(b => b.CODE === 'attendance_bot') || bots.result[0];
+        botId = String(ourBot.ID);
+        
+        // Обновляем bot_id в БД
+        await savePortal('b24-etqwns.bitrix24.ru', portal.access_token, portal.refresh_token, botId);
+        console.log('✅ bot_id исправлен:', botId);
+    }
+
+    res.json({
+        ok: true,
+        bots_found: bots?.result || [],
+        bot_id_saved: botId,
+        message: botId ? '✅ bot_id сохранён — теперь напиши боту "помощь"' : '❌ Боты не найдены'
+    });
+});
+
 // Диагностика — проверяет токен и пробует отправить уведомление
 app.get('/test-bot', async (req, res) => {
     const portal = await getPortal('b24-etqwns.bitrix24.ru');
