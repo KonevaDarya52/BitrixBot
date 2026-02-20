@@ -9,7 +9,7 @@ const app  = express();
 const port = process.env.PORT || 10000;
 
 const APP_DOMAIN    = process.env.APP_DOMAIN            || 'bitrixbot-bnnd.onrender.com';
-const BITRIX_DOMAIN = process.env.BITRIX_DOMAIN         || '';
+const BITRIX_DOMAIN = process.env.BITRIX_DOMAIN         || 'b24-etqwns.bitrix24.ru';
 const CLIENT_ID     = process.env.BITRIX_CLIENT_ID      || '';
 const CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET  || '';
 const OFFICE_LAT    = parseFloat(process.env.OFFICE_LAT    || '57.151929');
@@ -104,7 +104,7 @@ async function callBitrix(domain, accessToken, method, params = {}) {
         const resp = await axios.post(
             `https://${domain}/rest/${method}`,
             params,
-            { params: { auth: accessToken }, timeout: 8000 }
+            { params: { auth: accessToken }, timeout: 10000 }
         );
         return resp.data;
     } catch (err) {
@@ -175,21 +175,70 @@ function popGeoToken(token) {
     });
 }
 
+// ─── ★ Подписка на события бота через event.bind ─────────────────────────────
+// Для локальных приложений Битрикс24 события идут через event.bind,
+// а не через EVENT_MESSAGE_ADD в imbot.register
+async function bindBotEvents(domain, accessToken) {
+    const handlerUrl = `https://${APP_DOMAIN}/imbot`;
+    const events = ['ONIMBOTMESSAGEADD', 'ONIMBOTJOINCHAT', 'ONIMCOMMAND'];
+    const results = {};
+
+    for (const event of events) {
+        const r = await callBitrix(domain, accessToken, 'event.bind', {
+            EVENT:   event,
+            HANDLER: handlerUrl,
+        });
+        results[event] = r?.result ? '✅' : ('❌ ' + JSON.stringify(r));
+        console.log(`📎 event.bind ${event}:`, JSON.stringify(r));
+    }
+    return results;
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
-//  УСТАНОВКА — POST (Битрикс24 открывает приложение внутри себя)
+//  УСТАНОВКА — POST (Битрикс24 вызывает при установке/переустановке)
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/install', async (req, res) => {
-    console.log('📥 POST /install — тело запроса:', JSON.stringify(req.body));
+    console.log('📥 POST /install body:', JSON.stringify(req.body));
 
     const { AUTH_ID, REFRESH_ID, DOMAIN } = req.body;
     const domain = DOMAIN || req.body.domain || req.query.DOMAIN || req.query.domain || '';
 
     if (AUTH_ID && domain) {
-        console.log('🔑 Получен токен через POST /install для домена:', domain);
+        console.log('🔑 Токен получен для домена:', domain);
         const existing = await getPortal(domain);
         await savePortal(domain, AUTH_ID, REFRESH_ID || '', existing?.bot_id || '');
-        console.log('✅ Токен сохранён в БД из POST /install');
+        console.log('✅ Токен сохранён в БД');
+
+        // ★ Ключевой шаг: подписываемся на события
+        console.log('📎 Подписываемся на события бота...');
+        const bindResults = await bindBotEvents(domain, AUTH_ID);
+        console.log('📎 event.bind результаты:', JSON.stringify(bindResults));
+
+        // Регистрируем бота если ещё не зарегистрирован
+        if (!existing?.bot_id) {
+            console.log('🤖 Регистрируем бота...');
+            const botResp = await callBitrix(domain, AUTH_ID, 'imbot.register', {
+                CODE:                  'attendance_bot',
+                TYPE:                  'H',
+                EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
+                EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
+                EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
+                PROPERTIES: {
+                    NAME:          'Учёт времени',
+                    COLOR:         'GREEN',
+                    DESCRIPTION:   'Бот учёта присутствия сотрудников',
+                    WORK_POSITION: 'Помощник HR',
+                }
+            });
+            const botId = String(botResp?.result || '');
+            if (botId) {
+                await savePortal(domain, AUTH_ID, REFRESH_ID || '', botId);
+                console.log('✅ Бот зарегистрирован, ID:', botId);
+            } else {
+                console.error('❌ Не удалось зарегистрировать бота:', JSON.stringify(botResp));
+            }
+        }
     }
 
     res.send(`<!DOCTYPE html>
@@ -199,7 +248,7 @@ app.post('/install', async (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Учёт времени</title>
     <style>
-        body { font-family: Arial, sans-serif; background: #f0f4ff;
+        body { font-family:Arial,sans-serif; background:#f0f4ff;
                display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
         .card { background:white; border-radius:16px; padding:40px; text-align:center;
                 max-width:480px; width:90%; box-shadow:0 8px 24px rgba(0,0,0,0.1); }
@@ -218,101 +267,9 @@ app.post('/install', async (req, res) => {
     <div class="cmd">ушел</div><br>
     <div class="cmd">статус</div><br>
     <div class="cmd">помощь</div>
-    <p style="margin-top:24px; font-size:13px; color:#999;">
-        При отметке откроется страница в браузере — разрешите доступ к геолокации.
-    </p>
 </div>
 </body>
 </html>`);
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  УСТАНОВКА — GET (OAuth callback)
-// ═════════════════════════════════════════════════════════════════════════════
-
-app.get('/install', async (req, res) => {
-    const { code, domain } = req.query;
-
-    if (!code) {
-        const redirectUri = `https://${APP_DOMAIN}/install`;
-        const authUrl = `https://${BITRIX_DOMAIN}/oauth/authorize/`
-            + `?client_id=${CLIENT_ID}`
-            + `&response_type=code`
-            + `&redirect_uri=${encodeURIComponent(redirectUri)}`;
-        console.log('🔐 OAuth redirect →', authUrl);
-        return res.redirect(authUrl);
-    }
-
-    console.log('✅ OAuth callback, domain:', domain);
-
-    try {
-        const tokenResp = await axios.post(
-            'https://oauth.bitrix.info/oauth/token/', null,
-            { params: {
-                grant_type:    'authorization_code',
-                client_id:     CLIENT_ID,
-                client_secret: CLIENT_SECRET,
-                code,
-                redirect_uri:  `https://${APP_DOMAIN}/install`,
-            }}
-        );
-
-        const { access_token, refresh_token } = tokenResp.data;
-        console.log('✅ Got access_token');
-
-        const botResp = await axios.post(
-            `https://${domain}/rest/imbot.register`,
-            {
-                CODE:                  'attendance_bot',
-                TYPE:                  'H',
-                EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
-                EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
-                EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
-                PROPERTIES: {
-                    NAME:          'Учёт времени',
-                    COLOR:         'GREEN',
-                    DESCRIPTION:   'Бот учёта присутствия сотрудников',
-                    WORK_POSITION: 'Помощник HR',
-                }
-            },
-            { params: { auth: access_token } }
-        );
-
-        const botId = String(botResp.data?.result || '');
-        console.log('✅ Bot registered, ID:', botId);
-
-        await savePortal(domain, access_token, refresh_token, botId);
-        console.log('✅ Portal saved to DB:', domain);
-
-        res.send(`<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8"><title>Установлено!</title>
-    <style>
-        body { font-family:Arial,sans-serif; background:#e8f5e9;
-               display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
-        .card { background:white; border-radius:16px; padding:40px; text-align:center;
-                box-shadow:0 8px 24px rgba(0,0,0,0.1); max-width:480px; }
-        h1 { color:#2e7d32; }
-        .btn { display:inline-block; margin-top:20px; padding:14px 28px;
-               background:#2d8cff; color:white; border-radius:8px; text-decoration:none; }
-    </style>
-</head>
-<body>
-<div class="card">
-    <h1>🎉 Бот установлен!</h1>
-    <p>Бот <strong>"Учёт времени"</strong> появился в чатах.</p>
-    <p>Найдите его и напишите <strong>"помощь"</strong>.</p>
-    <a href="https://${domain}" class="btn">Перейти в Битрикс24</a>
-</div>
-</body>
-</html>`);
-
-    } catch (err) {
-        console.error('❌ Install error:', err.response?.data || err.message);
-        const detail = JSON.stringify(err.response?.data || err.message, null, 2);
-        res.status(500).send(`<pre>Ошибка установки:\n${detail}</pre>`);
-    }
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -434,42 +391,55 @@ app.post('/confirm-geo', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ВЕБХУК БОТА
+//  ВЕБХУК БОТА — сюда приходят все события от Битрикс24
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/imbot', async (req, res) => {
     console.log('📨 /imbot BODY:', JSON.stringify(req.body));
-    console.log('📨 /imbot QUERY:', JSON.stringify(req.query));
     res.json({ result: 'ok' });
 
     try {
-        const { event, data, auth } = req.body;
-        if (!event || !data?.PARAMS) return;
-                    console.log('⚠️ /imbot — нет event или data.PARAMS, выходим');
-                      // ← и эту
+        const body = req.body;
 
+        // Битрикс24 шлёт поля в разных регистрах — обрабатываем оба варианта
+        const event  = body.event || body.EVENT;
+        const data   = body.data  || body.DATA;
+        const auth   = body.auth  || body.AUTH;
 
-        const { MESSAGE, DIALOG_ID, BOT_ID, FROM_USER_ID, USER_NAME } = data.PARAMS;
-        const domain    = auth?.domain;
-        let   authToken = auth?.access_token;
+        if (!event) {
+            console.log('⚠️ /imbot — нет поля event');
+            return;
+        }
+
+        console.log('📨 event:', event);
+
+        const params       = data?.PARAMS   || data?.params   || {};
+        const MESSAGE      = params.MESSAGE      || params.message      || '';
+        const DIALOG_ID    = params.DIALOG_ID    || params.dialog_id    || '';
+        const BOT_ID       = params.BOT_ID       || params.bot_id       || '';
+        const FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || '';
+        const USER_NAME    = params.USER_NAME    || params.user_name    || '';
+
+        const domain    = auth?.domain       || auth?.DOMAIN       || BITRIX_DOMAIN;
+        let authToken   = auth?.access_token || auth?.ACCESS_TOKEN || '';
         const userName  = USER_NAME || `Пользователь ${FROM_USER_ID}`;
-        const cleanMsg  = (MESSAGE || '').toLowerCase().trim();
+        const cleanMsg  = MESSAGE.toLowerCase().trim();
         const geoUrl    = `https://${APP_DOMAIN}/geo`;
 
         console.log(`💬 [${domain}] ${userName}: "${MESSAGE}" (${event})`);
 
-        // Обновляем токен в БД при каждом входящем запросе
+        // Обновляем токен в БД
         if (domain && authToken) {
             const existing = await getPortal(domain);
             await savePortal(domain, authToken, existing?.refresh_token, BOT_ID || existing?.bot_id);
         }
 
-        // Если токен не пришёл от Битрикс24 — берём из БД
+        // Берём токен из БД если не пришёл
         if (!authToken) {
             const portal = await getPortal(domain);
             if (portal) {
                 authToken = portal.access_token;
-                console.log('🔑 Используем сохранённый токен для', domain);
+                console.log('🔑 Используем токен из БД');
             } else {
                 console.error('❌ Нет токена для домена', domain);
                 return;
@@ -478,11 +448,10 @@ app.post('/imbot', async (req, res) => {
 
         const botId = BOT_ID || (await getPortal(domain))?.bot_id;
 
-        // Приветствие при первом входе в чат
+        // Приветствие
         if (event === 'ONIMBOTJOINCHAT') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `👋 Привет, ${userName}!\n\n` +
-                `Я фиксирую присутствие сотрудников в офисе.\n\n` +
                 `Команды:\n` +
                 `• "пришел" — отметить приход\n` +
                 `• "ушел" — отметить уход\n` +
@@ -499,8 +468,7 @@ app.post('/imbot', async (req, res) => {
             const token = makeToken();
             await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'in');
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `📍 Нажми на ссылку — откроется страница геолокации.\n` +
-                `Разреши доступ к местоположению и отметка зафиксируется.\n\n` +
+                `📍 Нажми на ссылку — откроется страница геолокации.\n\n` +
                 `👉 ${geoUrl}?token=${token}\n\n` +
                 `_Ссылка действительна 10 минут_`
             );
@@ -518,7 +486,7 @@ app.post('/imbot', async (req, res) => {
             }
             if (hasOut) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `ℹ️ Уход уже отмечен сегодня.\nНапиши "статус" чтобы посмотреть.`);
+                    `ℹ️ Уход уже отмечен сегодня.`);
                 return;
             }
 
@@ -535,7 +503,7 @@ app.post('/imbot', async (req, res) => {
             const marks = await getTodayMarks(FROM_USER_ID);
             if (marks.length === 0) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `📊 Сегодня отметок нет.\nНапиши "пришел" когда придёшь в офис.`);
+                    `📊 Сегодня отметок нет.`);
             } else {
                 const lines = marks.map(m => {
                     const t   = new Date(m.timestamp + 'Z').toLocaleTimeString('ru-RU',
@@ -552,20 +520,19 @@ app.post('/imbot', async (req, res) => {
         } else if (cleanMsg === 'помощь') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `🤖 Бот учёта посещаемости\n\n` +
-                `• "пришел" — отметить приход (нужна геолокация)\n` +
+                `• "пришел" — отметить приход\n` +
                 `• "ушел" — отметить уход\n` +
                 `• "статус" — отметки за сегодня\n` +
                 `• "помощь" — эта справка`
             );
 
-        // неизвестная команда
         } else {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `❓ Не понимаю "${MESSAGE}".\nНапиши "помощь" для списка команд.`);
+                `❓ Не понимаю "${MESSAGE}".\nНапиши "помощь".`);
         }
 
     } catch (err) {
-        console.error('❌ imbot error:', err.message);
+        console.error('❌ imbot error:', err.message, err.stack);
     }
 });
 
@@ -582,150 +549,40 @@ cron.schedule('*/15 * * * *', () => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.get('/', (req, res) => {
-    res.send(`<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Бот учёта времени</title>
-    <style>
-        body { font-family:Arial,sans-serif; background:linear-gradient(135deg,#667eea,#764ba2);
-               min-height:100vh; margin:0; display:flex; align-items:center; justify-content:center; }
-        .card { background:white; border-radius:16px; padding:40px; max-width:500px; width:90%;
-                box-shadow:0 10px 40px rgba(0,0,0,0.2); }
-        h1 { color:#2d8cff; margin-bottom:8px; }
-        .btn { display:inline-block; margin-top:24px; padding:16px 32px;
-               background:#2d8cff; color:white; border-radius:50px;
-               text-decoration:none; font-size:18px; font-weight:bold; }
-        ul { margin-top:16px; padding-left:20px; line-height:2; }
-    </style>
-</head>
-<body>
-<div class="card">
-    <h1>🤖 Бот учёта рабочего времени</h1>
-    <p>Фиксация прихода и ухода с проверкой геолокации.</p>
-    <ul>
-        <li>📍 Геолокация при каждой отметке</li>
-        <li>⚠️ Уведомление если сотрудник вне офиса</li>
-        <li>📊 Статус за текущий день</li>
-    </ul>
-    <a href="/install" class="btn">📥 Установить в Битрикс24</a>
-</div>
-</body>
-</html>`);
+    res.send(`<h1>🤖 Бот учёта рабочего времени</h1><a href="/install">Установить</a>`);
 });
 
 app.get('/status', async (req, res) => {
     const portalsInDb = await new Promise(r => {
         db.all(`SELECT domain, bot_id, updated_at FROM portals`, [], (e, rows) => r(rows || []));
     });
-    res.json({
-        ok:      true,
-        service: 'Bitrix24 Attendance Bot v3',
-        domain:  APP_DOMAIN,
-        office:  `${OFFICE_LAT}, ${OFFICE_LON} (радиус ${OFFICE_RADIUS}м)`,
-        portals: portalsInDb,
-        time:    new Date().toISOString(),
-    });
+    res.json({ ok: true, service: 'v4', portals: portalsInDb, time: new Date().toISOString() });
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-//  /setup — полная переустановка за один шаг
-// ═══════════════════════════════════════════════════════════════════════
-app.get('/setup', async (req, res) => {
-    const log = [];
+// ─── /bind-events — подписать события вручную ────────────────────────────────
+app.get('/bind-events', async (req, res) => {
+    const domain = BITRIX_DOMAIN || 'b24-etqwns.bitrix24.ru';
+    const portal = await getPortal(domain);
+    if (!portal) return res.json({ ok: false, error: 'Портал не найден. Переустанови приложение.' });
 
-    try {
-        log.push('1️⃣ Берём токен из БД...');
-        const portal = await getPortal(BITRIX_DOMAIN);
-        if (!portal) {
-            return res.json({
-                ok: false,
-                log: ['❌ Токен не найден в БД', '👉 Сначала нажми "Переустановить" в Битрикс24 → Разработчикам → Приложения'],
-                hint: 'После переустановки снова открой /setup'
-            });
-        }
-        const access_token  = portal.access_token;
-        const refresh_token = portal.refresh_token;
-        log.push('✅ Токен найден в БД');
-
-        const profile = await callBitrix(BITRIX_DOMAIN, access_token, 'profile', {});
-        if (!profile?.result) {
-            log.push('❌ Токен протух! Нажми "Переустановить" в Битрикс24 → Разработчикам → Приложения');
-            return res.json({ ok: false, log });
-        }
-        log.push('✅ Профиль: ' + (profile.result.NAME || 'неизвестно'));
-
-        const botsResp = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.bot.list', {});
-        const botsObj  = botsResp?.result || {};
-        const bots     = Object.values(botsObj);
-        log.push('📋 Ботов найдено: ' + bots.length);
-
-        let botId = '';
-
-        if (bots.length > 0) {
-            const ourBot = bots.find(b => b.CODE === 'attendance_bot') || bots[0];
-            botId = String(ourBot.ID);
-            log.push('✅ Бот уже существует, ID: ' + botId);
-
-            const upd = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.update', {
-                BOT_ID: botId,
-                FIELDS: {
-                    EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
-                    EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
-                    EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
-                }
-            });
-            log.push(upd?.result ? '✅ Вебхук бота обновлён' : '⚠️ imbot.update не сработал: ' + JSON.stringify(upd));
-        } else {
-            log.push('2️⃣ Регистрируем бота...');
-            const botResp = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.register', {
-                CODE:                  'attendance_bot',
-                TYPE:                  'H',
-                EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
-                EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
-                EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
-                PROPERTIES: {
-                    NAME:          'Учёт времени',
-                    COLOR:         'GREEN',
-                    DESCRIPTION:   'Бот учёта присутствия сотрудников',
-                    WORK_POSITION: 'Помощник HR',
-                }
-            });
-            botId = String(botResp?.result || '');
-            log.push('✅ Бот зарегистрирован, ID: ' + botId);
-        }
-
-        await savePortal(BITRIX_DOMAIN, access_token, refresh_token || '', botId);
-        log.push('✅ Портал сохранён в БД');
-        log.push('🎉 Готово! Напиши боту "помощь" в Битрикс24.');
-
-        res.json({ ok: true, log, bot_id: botId, domain: BITRIX_DOMAIN });
-
-    } catch (err) {
-        log.push('❌ Ошибка: ' + (err.response?.data ? JSON.stringify(err.response.data) : err.message));
-        res.json({ ok: false, log, error: err.message });
-    }
+    const results = await bindBotEvents(domain, portal.access_token);
+    res.json({ ok: true, results, handler: `https://${APP_DOMAIN}/imbot` });
 });
 
-// ═══════════════════════════════════════════════════════════════════════
-//  /reinstall-bot — удалить бота и зарегистрировать заново
-// ═══════════════════════════════════════════════════════════════════════
+// ─── /reinstall-bot ───────────────────────────────────────────────────────────
 app.get('/reinstall-bot', async (req, res) => {
     const log = [];
     const domain = BITRIX_DOMAIN || 'b24-etqwns.bitrix24.ru';
     const portal = await getPortal(domain);
-    if (!portal) return res.json({ ok: false, error: 'Портал не найден в БД. Сначала переустанови приложение в Битрикс24.' });
+    if (!portal) return res.json({ ok: false, error: 'Портал не найден в БД.' });
 
     const token = portal.access_token;
 
-    // Удаляем старого бота
-    const del = await callBitrix(domain, token, 'imbot.unregister', { BOT_ID: portal.bot_id || '21' });
-    log.push('🗑 Удаление бота: ' + JSON.stringify(del));
+    const del = await callBitrix(domain, token, 'imbot.unregister', { BOT_ID: portal.bot_id });
+    log.push('🗑 Удаление: ' + JSON.stringify(del));
 
-    // Пауза 1 секунда
     await new Promise(r => setTimeout(r, 1000));
 
-    // Регистрируем заново с правильным вебхуком
     const reg = await callBitrix(domain, token, 'imbot.register', {
         CODE:                  'attendance_bot',
         TYPE:                  'H',
@@ -733,27 +590,25 @@ app.get('/reinstall-bot', async (req, res) => {
         EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
         EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
         PROPERTIES: {
-            NAME:          'Учёт времени',
-            COLOR:         'GREEN',
-            DESCRIPTION:   'Бот учёта присутствия сотрудников',
-            WORK_POSITION: 'Помощник HR',
+            NAME: 'Учёт времени', COLOR: 'GREEN',
+            DESCRIPTION: 'Бот учёта присутствия', WORK_POSITION: 'Помощник HR',
         }
     });
     const newBotId = String(reg?.result || '');
-    log.push('✅ Регистрация бота: ' + JSON.stringify(reg));
+    log.push('✅ Регистрация: ' + JSON.stringify(reg));
 
     if (newBotId) {
         await savePortal(domain, token, portal.refresh_token, newBotId);
-        log.push('✅ Новый bot_id сохранён в БД: ' + newBotId);
-        log.push('🎉 Готово! Найди бота в Битрикс24 и напиши "помощь"');
-    } else {
-        log.push('❌ Не удалось зарегистрировать бота');
+        log.push('✅ bot_id: ' + newBotId);
     }
 
-    res.json({ ok: !!newBotId, log, new_bot_id: newBotId, webhook: `https://${APP_DOMAIN}/imbot` });
+    const bindResults = await bindBotEvents(domain, token);
+    log.push('📎 event.bind: ' + JSON.stringify(bindResults));
+
+    res.json({ ok: !!newBotId, log, new_bot_id: newBotId });
 });
 
-// ─── /fix-bot — диагностика и починка bot_id ────────────────────────────────
+// ─── /fix-bot ─────────────────────────────────────────────────────────────────
 app.get('/fix-bot', async (req, res) => {
     const domain = BITRIX_DOMAIN || 'b24-etqwns.bitrix24.ru';
     const portal = await getPortal(domain);
@@ -766,80 +621,35 @@ app.get('/fix-bot', async (req, res) => {
     if (botsArr.length > 0) {
         const ourBot = botsArr.find(b => b.CODE === 'attendance_bot') || botsArr[0];
         botId = String(ourBot.ID);
-
-        await callBitrix(domain, portal.access_token, 'imbot.update', {
-            BOT_ID: botId,
-            FIELDS: {
-                EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
-                EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
-                EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
-            }
-        });
-
         await savePortal(domain, portal.access_token, portal.refresh_token, botId);
-        console.log('✅ bot_id исправлен:', botId);
     }
 
+    const bindResults = await bindBotEvents(domain, portal.access_token);
+
     res.json({
-        ok:           true,
-        bots_found:   botsArr,
-        bot_id_saved: botId,
-        webhook:      `https://${APP_DOMAIN}/imbot`,
-        message:      botId
-            ? '✅ bot_id сохранён — напиши боту "помощь"'
-            : '❌ Боты не найдены'
+        ok: true, bots_found: botsArr, bot_id_saved: botId,
+        bind_results: bindResults, handler: `https://${APP_DOMAIN}/imbot`,
+        message: botId ? '✅ Готово — напиши боту "помощь"' : '❌ Боты не найдены'
     });
 });
 
-// ─── /test-bot — проверка токена ─────────────────────────────────────────────
+// ─── /test-bot ────────────────────────────────────────────────────────────────
 app.get('/test-bot', async (req, res) => {
     const domain = BITRIX_DOMAIN || 'b24-etqwns.bitrix24.ru';
     const portal = await getPortal(domain);
-    if (!portal) {
-        return res.json({ ok: false, error: 'Портал не найден в БД. Переустановите бота.' });
-    }
+    if (!portal) return res.json({ ok: false, error: 'Портал не найден в БД.' });
+
     const me = await callBitrix(domain, portal.access_token, 'profile', {});
     const notify = await callBitrix(domain, portal.access_token, 'im.notify.system.add', {
-        USER_ID: MANAGER_ID,
-        MESSAGE: '🔧 Тест бота: если видите это — уведомления работают!'
+        USER_ID: MANAGER_ID, MESSAGE: '🔧 Тест: уведомления работают!'
     });
     res.json({
         portal_found:  true,
         bot_id:        portal.bot_id,
         token_updated: portal.updated_at,
         profile_check: me?.result ? '✅ Токен валидный' : '❌ Токен недействителен',
-        notify_result: notify?.result ? '✅ Уведомление отправлено' : '❌ Ошибка отправки',
+        notify_result: notify?.result ? '✅ Уведомление отправлено' : '❌ Ошибка',
         profile_name:  me?.result ? `${me.result.NAME} ${me.result.LAST_NAME}` : null,
-    });
-});
-
-// ─── /check-bot ──────────────────────────────────────────────────────────────
-app.get('/check-bot', async (req, res) => {
-    const portal = await getPortal(BITRIX_DOMAIN);
-    if (!portal) return res.json({ ok: false, error: 'Сначала открой /setup' });
-
-    const botInfo = await callBitrix(BITRIX_DOMAIN, portal.access_token, 'imbot.bot.list', {});
-
-    let updateResult = null;
-    if (portal.bot_id) {
-        updateResult = await callBitrix(BITRIX_DOMAIN, portal.access_token, 'imbot.update', {
-            BOT_ID: portal.bot_id,
-            FIELDS: {
-                EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
-                EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
-                EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
-            }
-        });
-    }
-
-    res.json({
-        bot_id:        portal.bot_id,
-        expected_hook: `https://${APP_DOMAIN}/imbot`,
-        bots_raw:      botInfo?.result || {},
-        update_result: updateResult,
-        message:       updateResult?.result
-            ? '✅ Вебхук обновлён — напиши боту "помощь"'
-            : '❌ Не удалось обновить вебхук'
     });
 });
 
