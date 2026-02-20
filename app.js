@@ -438,8 +438,9 @@ app.post('/confirm-geo', async (req, res) => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/imbot', async (req, res) => {
-    res.json({ result:'ok' });
-    console.log('📨 /imbot RAW:', JSON.stringify(req.body));  // отвечаем немедленно
+    console.log('📨 /imbot BODY:', JSON.stringify(req.body));
+    console.log('📨 /imbot QUERY:', JSON.stringify(req.query));
+    res.json({ result: 'ok' });
 
     try {
         const { event, data, auth } = req.body;
