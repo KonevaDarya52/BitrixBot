@@ -658,20 +658,19 @@ app.get('/setup', async (req, res) => {
     const log = [];
     
     try {
-        // Шаг 1: Получаем новый токен через client_credentials
-        log.push('1️⃣ Получаем токен...');
-        const tokenResp = await axios.post(
-            'https://oauth.bitrix.info/oauth/token/', null,
-            { params: {
-                grant_type:    'client_credentials',
-                client_id:     CLIENT_ID,
-                client_secret: CLIENT_SECRET,
-            }}
-        );
-        
-        const { access_token, refresh_token } = tokenResp.data;
-        if (!access_token) throw new Error('Не получили токен: ' + JSON.stringify(tokenResp.data));
-        log.push('✅ Токен получен');
+        // Шаг 1: Берём токен из БД (сохраняется при переустановке)
+        log.push('1️⃣ Берём токен из БД...');
+        const portal = await getPortal(BITRIX_DOMAIN);
+        if (!portal) {
+            return res.json({ 
+                ok: false, 
+                log: ['❌ Токен не найден в БД', '👉 Сначала нажми "Переустановить" в Битрикс24 → Разработчикам → Приложения'],
+                hint: 'После переустановки снова открой /setup'
+            });
+        }
+        const access_token = portal.access_token;
+        const refresh_token = portal.refresh_token;
+        log.push('✅ Токен найден в БД');
 
         // Шаг 2: Проверяем профиль
         const profile = await callBitrix(BITRIX_DOMAIN, access_token, 'profile', {});
