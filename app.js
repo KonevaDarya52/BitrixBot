@@ -666,7 +666,7 @@ app.get('/setup', async (req, res) => {
             log.push('✅ Бот уже существует, ID: ' + botId);
 
             // Обновляем вебхук
-            const upd = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.bot.update', {
+            const upd = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.update', {
                 BOT_ID: botId,
                 FIELDS: {
                     EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
@@ -724,7 +724,7 @@ app.get('/fix-bot', async (req, res) => {
         botId = String(ourBot.ID);
 
         // Обновляем вебхук
-        await callBitrix(domain, portal.access_token, 'imbot.bot.update', {
+        await callBitrix(domain, portal.access_token, 'imbot.update', {
             BOT_ID: botId,
             FIELDS: {
                 EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
@@ -779,7 +779,7 @@ app.get('/check-bot', async (req, res) => {
 
     let updateResult = null;
     if (portal.bot_id) {
-        updateResult = await callBitrix(BITRIX_DOMAIN, portal.access_token, 'imbot.bot.update', {
+        updateResult = await callBitrix(BITRIX_DOMAIN, portal.access_token, 'imbot.update', {
             BOT_ID: portal.bot_id,
             FIELDS: {
                 EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
