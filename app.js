@@ -643,7 +643,6 @@ app.get('/setup', async (req, res) => {
         const refresh_token = portal.refresh_token;
         log.push('✅ Токен найден в БД');
 
-        // Проверяем профиль
         const profile = await callBitrix(BITRIX_DOMAIN, access_token, 'profile', {});
         if (!profile?.result) {
             log.push('❌ Токен протух! Нажми "Переустановить" в Битрикс24 → Разработчикам → Приложения');
@@ -651,21 +650,18 @@ app.get('/setup', async (req, res) => {
         }
         log.push('✅ Профиль: ' + (profile.result.NAME || 'неизвестно'));
 
-        // ★ ИСПРАВЛЕНО: imbot.bot.list возвращает объект, не массив
         const botsResp = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.bot.list', {});
         const botsObj  = botsResp?.result || {};
-        const bots     = Object.values(botsObj); // ← вот исправление
+        const bots     = Object.values(botsObj);
         log.push('📋 Ботов найдено: ' + bots.length);
 
         let botId = '';
 
         if (bots.length > 0) {
-            // Бот уже есть — берём его ID
             const ourBot = bots.find(b => b.CODE === 'attendance_bot') || bots[0];
             botId = String(ourBot.ID);
             log.push('✅ Бот уже существует, ID: ' + botId);
 
-            // Обновляем вебхук
             const upd = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.update', {
                 BOT_ID: botId,
                 FIELDS: {
@@ -674,9 +670,8 @@ app.get('/setup', async (req, res) => {
                     EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
                 }
             });
-            log.push(upd?.result ? '✅ Вебхук бота обновлён' : '⚠️ Не удалось обновить вебхук: ' + JSON.stringify(upd));
+            log.push(upd?.result ? '✅ Вебхук бота обновлён' : '⚠️ imbot.update не сработал: ' + JSON.stringify(upd));
         } else {
-            // Бота нет — регистрируем
             log.push('2️⃣ Регистрируем бота...');
             const botResp = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.register', {
                 CODE:                  'attendance_bot',
@@ -695,7 +690,6 @@ app.get('/setup', async (req, res) => {
             log.push('✅ Бот зарегистрирован, ID: ' + botId);
         }
 
-        // Сохраняем в БД
         await savePortal(BITRIX_DOMAIN, access_token, refresh_token || '', botId);
         log.push('✅ Портал сохранён в БД');
         log.push('🎉 Готово! Напиши боту "помощь" в Битрикс24.');
@@ -708,13 +702,58 @@ app.get('/setup', async (req, res) => {
     }
 });
 
+// ═══════════════════════════════════════════════════════════════════════
+//  /reinstall-bot — удалить бота и зарегистрировать заново
+// ═══════════════════════════════════════════════════════════════════════
+app.get('/reinstall-bot', async (req, res) => {
+    const log = [];
+    const domain = BITRIX_DOMAIN || 'b24-etqwns.bitrix24.ru';
+    const portal = await getPortal(domain);
+    if (!portal) return res.json({ ok: false, error: 'Портал не найден в БД. Сначала переустанови приложение в Битрикс24.' });
+
+    const token = portal.access_token;
+
+    // Удаляем старого бота
+    const del = await callBitrix(domain, token, 'imbot.unregister', { BOT_ID: portal.bot_id || '21' });
+    log.push('🗑 Удаление бота: ' + JSON.stringify(del));
+
+    // Пауза 1 секунда
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Регистрируем заново с правильным вебхуком
+    const reg = await callBitrix(domain, token, 'imbot.register', {
+        CODE:                  'attendance_bot',
+        TYPE:                  'H',
+        EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
+        EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
+        EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
+        PROPERTIES: {
+            NAME:          'Учёт времени',
+            COLOR:         'GREEN',
+            DESCRIPTION:   'Бот учёта присутствия сотрудников',
+            WORK_POSITION: 'Помощник HR',
+        }
+    });
+    const newBotId = String(reg?.result || '');
+    log.push('✅ Регистрация бота: ' + JSON.stringify(reg));
+
+    if (newBotId) {
+        await savePortal(domain, token, portal.refresh_token, newBotId);
+        log.push('✅ Новый bot_id сохранён в БД: ' + newBotId);
+        log.push('🎉 Готово! Найди бота в Битрикс24 и напиши "помощь"');
+    } else {
+        log.push('❌ Не удалось зарегистрировать бота');
+    }
+
+    res.json({ ok: !!newBotId, log, new_bot_id: newBotId, webhook: `https://${APP_DOMAIN}/imbot` });
+});
+
 // ─── /fix-bot — диагностика и починка bot_id ────────────────────────────────
 app.get('/fix-bot', async (req, res) => {
     const domain = BITRIX_DOMAIN || 'b24-etqwns.bitrix24.ru';
     const portal = await getPortal(domain);
     if (!portal) return res.json({ ok: false, error: 'Портал не найден в БД' });
 
-    // ★ ИСПРАВЛЕНО: result — объект, не массив
     const botsResp = await callBitrix(domain, portal.access_token, 'imbot.bot.list', {});
     const botsArr  = Object.values(botsResp?.result || {});
 
@@ -723,7 +762,6 @@ app.get('/fix-bot', async (req, res) => {
         const ourBot = botsArr.find(b => b.CODE === 'attendance_bot') || botsArr[0];
         botId = String(ourBot.ID);
 
-        // Обновляем вебхук
         await callBitrix(domain, portal.access_token, 'imbot.update', {
             BOT_ID: botId,
             FIELDS: {
@@ -734,7 +772,7 @@ app.get('/fix-bot', async (req, res) => {
         });
 
         await savePortal(domain, portal.access_token, portal.refresh_token, botId);
-        console.log('✅ bot_id исправлен и вебхук обновлён:', botId);
+        console.log('✅ bot_id исправлен:', botId);
     }
 
     res.json({
@@ -743,12 +781,12 @@ app.get('/fix-bot', async (req, res) => {
         bot_id_saved: botId,
         webhook:      `https://${APP_DOMAIN}/imbot`,
         message:      botId
-            ? '✅ bot_id сохранён, вебхук обновлён — напиши боту "помощь"'
+            ? '✅ bot_id сохранён — напиши боту "помощь"'
             : '❌ Боты не найдены'
     });
 });
 
-// ─── /test-bot — проверка токена и отправка тестового уведомления ────────────
+// ─── /test-bot — проверка токена ─────────────────────────────────────────────
 app.get('/test-bot', async (req, res) => {
     const domain = BITRIX_DOMAIN || 'b24-etqwns.bitrix24.ru';
     const portal = await getPortal(domain);
@@ -770,7 +808,7 @@ app.get('/test-bot', async (req, res) => {
     });
 });
 
-// ─── /check-bot — проверка и обновление вебхука ──────────────────────────────
+// ─── /check-bot ──────────────────────────────────────────────────────────────
 app.get('/check-bot', async (req, res) => {
     const portal = await getPortal(BITRIX_DOMAIN);
     if (!portal) return res.json({ ok: false, error: 'Сначала открой /setup' });
