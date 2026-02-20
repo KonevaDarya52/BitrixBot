@@ -177,6 +177,45 @@ function popGeoToken(token) {
 //  УСТАНОВКА ЧЕРЕЗ OAUTH (для тестового портала)
 // ═════════════════════════════════════════════════════════════════════════════
 
+// Битрикс24 открывает приложение через POST — редиректим на GET
+app.post('/install', (req, res) => {
+    const domain = req.body?.DOMAIN || req.query?.domain || '';
+    // Показываем страницу успеха — бот уже установлен
+    res.send(`<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Бот учёта времени</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f0f4ff;
+               display:flex; align-items:center; justify-content:center;
+               min-height:100vh; margin:0; }
+        .card { background:white; border-radius:16px; padding:40px;
+                text-align:center; max-width:480px; width:90%;
+                box-shadow:0 8px 24px rgba(0,0,0,0.1); }
+        h1 { color:#2e7d32; margin-bottom:16px; }
+        .cmd { background:#f5f5f5; border-radius:8px; padding:12px 20px;
+               margin:8px 0; font-size:18px; font-weight:bold; }
+        p { color:#555; line-height:1.6; }
+    </style>
+</head>
+<body>
+<div class="card">
+    <h1>🤖 Бот учёта времени установлен!</h1>
+    <p>Найдите бота <strong>"Учёт времени"</strong> в списке чатов Битрикс24 и напишите одну из команд:</p>
+    <div class="cmd">пришел</div>
+    <div class="cmd">ушел</div>
+    <div class="cmd">статус</div>
+    <div class="cmd">помощь</div>
+    <p style="margin-top:20px; font-size:13px; color:#999;">
+        При отметке откроется страница в браузере — разрешите доступ к геолокации.
+    </p>
+</div>
+</body>
+</html>`);
+});
+
 // Страница установки
 app.get('/install', async (req, res) => {
     const { code, domain } = req.query;
