@@ -8,25 +8,20 @@ const cron    = require('node-cron');
 const app  = express();
 const port = process.env.PORT || 10000;
 
-// ─── Настройки ────────────────────────────────────────────────────────────────
-const APP_DOMAIN     = process.env.APP_DOMAIN     || 'bitrixbot-bnnd.onrender.com';
-const BITRIX_DOMAIN  = process.env.BITRIX_DOMAIN  || '';
-const CLIENT_ID      = process.env.BITRIX_CLIENT_ID     || '';
-const CLIENT_SECRET  = process.env.BITRIX_CLIENT_SECRET || '';
-const BITRIX_WEBHOOK = process.env.BITRIX_WEBHOOK || ''; // заполнится когда заказчик даст вебхук
-const OFFICE_LAT     = parseFloat(process.env.OFFICE_LAT    || '57.151929');
-const OFFICE_LON     = parseFloat(process.env.OFFICE_LON    || '65.592076');
-const OFFICE_RADIUS  = parseInt(process.env.OFFICE_RADIUS   || '100');
-const MANAGER_ID     = process.env.MANAGER_USER_ID || '1';
-
-// ─── Хранилище токенов портала (в памяти — для каждого установленного портала)
-// Структура: { domain: { access_token, refresh_token, bot_id } }
-const portals = {};
+const APP_DOMAIN    = process.env.APP_DOMAIN            || 'bitrixbot-bnnd.onrender.com';
+const BITRIX_DOMAIN = process.env.BITRIX_DOMAIN         || '';
+const CLIENT_ID     = process.env.BITRIX_CLIENT_ID      || '';
+const CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET  || '';
+const OFFICE_LAT    = parseFloat(process.env.OFFICE_LAT    || '57.151929');
+const OFFICE_LON    = parseFloat(process.env.OFFICE_LON    || '65.592076');
+const OFFICE_RADIUS = parseInt(process.env.OFFICE_RADIUS   || '100');
+const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
 
 // ─── База данных ──────────────────────────────────────────────────────────────
 const db = new sqlite3.Database(path.join(__dirname, 'attendance.db'));
 
 db.serialize(() => {
+    // Отметки присутствия
     db.run(`CREATE TABLE IF NOT EXISTS attendance (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id     TEXT NOT NULL,
@@ -39,6 +34,7 @@ db.serialize(() => {
         in_office   INTEGER DEFAULT 0
     )`);
 
+    // Одноразовые токены геолокации
     db.run(`CREATE TABLE IF NOT EXISTS geo_tokens (
         token        TEXT PRIMARY KEY,
         user_id      TEXT NOT NULL,
@@ -49,6 +45,15 @@ db.serialize(() => {
         access_token TEXT NOT NULL,
         type         TEXT NOT NULL,
         created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    // ★ Токены порталов — в БД, не в памяти — переживают перезапуск Render
+    db.run(`CREATE TABLE IF NOT EXISTS portals (
+        domain        TEXT PRIMARY KEY,
+        access_token  TEXT NOT NULL,
+        refresh_token TEXT,
+        bot_id        TEXT,
+        updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 });
 
@@ -78,23 +83,45 @@ function makeToken() {
     return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-// Вызов REST API Битрикс24 с токеном доступа
+// ─── Портал: сохранить токены в БД
+function savePortal(domain, accessToken, refreshToken, botId) {
+    return new Promise((resolve, reject) => {
+        db.run(
+            `INSERT OR REPLACE INTO portals (domain, access_token, refresh_token, bot_id, updated_at)
+             VALUES (?, ?, ?, ?, datetime('now'))`,
+            [domain, accessToken, refreshToken || '', botId || ''],
+            err => err ? reject(err) : resolve()
+        );
+    });
+}
+
+// ─── Портал: получить токены из БД
+function getPortal(domain) {
+    return new Promise((resolve, reject) => {
+        db.get(`SELECT * FROM portals WHERE domain = ?`, [domain],
+            (err, row) => err ? reject(err) : resolve(row || null)
+        );
+    });
+}
+
+// ─── Вызов Битрикс24 REST API
 async function callBitrix(domain, accessToken, method, params = {}) {
     try {
         const resp = await axios.post(
             `https://${domain}/rest/${method}`,
             params,
-            { params: { auth: accessToken } }
+            { params: { auth: accessToken }, timeout: 8000 }
         );
         return resp.data;
     } catch (err) {
-        console.error(`❌ Bitrix API error [${method}]:`, err.response?.data || err.message);
+        console.error(`❌ Bitrix API [${method}]:`, err.response?.data || err.message);
         return null;
     }
 }
 
-// Отправить сообщение сотруднику в чат бота
+// ─── Отправить сообщение в чат бота
 async function sendMessage(domain, accessToken, botId, dialogId, message) {
+    console.log(`📤 sendMessage → ${domain}, bot=${botId}, dialog=${dialogId}`);
     return callBitrix(domain, accessToken, 'imbot.message.add', {
         BOT_ID:    botId,
         DIALOG_ID: dialogId,
@@ -102,25 +129,12 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
     });
 }
 
-// Уведомить руководителя
+// ─── Уведомить руководителя
 async function notifyManager(domain, accessToken, text) {
-    // Через вебхук (если есть)
-    if (BITRIX_WEBHOOK) {
-        try {
-            await axios.post(`${BITRIX_WEBHOOK}im.notify.system.add`, {
-                USER_ID: MANAGER_ID,
-                MESSAGE: text,
-            });
-            return;
-        } catch {}
-    }
-    // Через токен портала
-    if (domain && accessToken) {
-        await callBitrix(domain, accessToken, 'im.notify.system.add', {
-            USER_ID: MANAGER_ID,
-            MESSAGE: text,
-        });
-    }
+    return callBitrix(domain, accessToken, 'im.notify.system.add', {
+        USER_ID: MANAGER_ID,
+        MESSAGE: text,
+    });
 }
 
 // ─── БД: записать отметку
@@ -148,7 +162,7 @@ function getTodayMarks(userId) {
     });
 }
 
-// ─── БД: сохранить токен геолокации
+// ─── БД: сохранить гео-токен
 function saveGeoToken(token, userId, userName, dialogId, botId, domain, accessToken, type) {
     return new Promise((resolve, reject) => {
         db.run(
@@ -161,7 +175,7 @@ function saveGeoToken(token, userId, userName, dialogId, botId, domain, accessTo
     });
 }
 
-// ─── БД: взять и удалить токен (одноразовый)
+// ─── БД: взять и удалить гео-токен (одноразовый)
 function popGeoToken(token) {
     return new Promise((resolve, reject) => {
         db.get(`SELECT * FROM geo_tokens WHERE token = ?`, [token], (err, row) => {
@@ -174,41 +188,38 @@ function popGeoToken(token) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  УСТАНОВКА ЧЕРЕЗ OAUTH (для тестового портала)
+//  УСТАНОВКА — POST (Битрикс24 открывает приложение внутри себя)
 // ═════════════════════════════════════════════════════════════════════════════
 
-// Битрикс24 открывает приложение через POST — редиректим на GET
 app.post('/install', (req, res) => {
-    const domain = req.body?.DOMAIN || req.query?.domain || '';
-    // Показываем страницу успеха — бот уже установлен
+    console.log('📥 POST /install от Битрикс24');
     res.send(`<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Бот учёта времени</title>
+    <title>Учёт времени</title>
     <style>
         body { font-family: Arial, sans-serif; background: #f0f4ff;
-               display:flex; align-items:center; justify-content:center;
-               min-height:100vh; margin:0; }
-        .card { background:white; border-radius:16px; padding:40px;
-                text-align:center; max-width:480px; width:90%;
-                box-shadow:0 8px 24px rgba(0,0,0,0.1); }
+               display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
+        .card { background:white; border-radius:16px; padding:40px; text-align:center;
+                max-width:480px; width:90%; box-shadow:0 8px 24px rgba(0,0,0,0.1); }
         h1 { color:#2e7d32; margin-bottom:16px; }
         .cmd { background:#f5f5f5; border-radius:8px; padding:12px 20px;
-               margin:8px 0; font-size:18px; font-weight:bold; }
+               margin:8px 0; font-size:18px; font-weight:bold; display:inline-block; width:200px; }
         p { color:#555; line-height:1.6; }
     </style>
 </head>
 <body>
 <div class="card">
-    <h1>🤖 Бот учёта времени установлен!</h1>
-    <p>Найдите бота <strong>"Учёт времени"</strong> в списке чатов Битрикс24 и напишите одну из команд:</p>
-    <div class="cmd">пришел</div>
-    <div class="cmd">ушел</div>
-    <div class="cmd">статус</div>
+    <h1>🤖 Бот "Учёт времени" установлен!</h1>
+    <p>Найдите бота в списке чатов Битрикс24 и напишите одну из команд:</p>
+    <br>
+    <div class="cmd">пришел</div><br>
+    <div class="cmd">ушел</div><br>
+    <div class="cmd">статус</div><br>
     <div class="cmd">помощь</div>
-    <p style="margin-top:20px; font-size:13px; color:#999;">
+    <p style="margin-top:24px; font-size:13px; color:#999;">
         При отметке откроется страница в браузере — разрешите доступ к геолокации.
     </p>
 </div>
@@ -216,37 +227,37 @@ app.post('/install', (req, res) => {
 </html>`);
 });
 
-// Страница установки
+// ═════════════════════════════════════════════════════════════════════════════
+//  УСТАНОВКА — GET (OAuth callback)
+// ═════════════════════════════════════════════════════════════════════════════
+
 app.get('/install', async (req, res) => {
     const { code, domain } = req.query;
 
-    // Нет кода — редиректим на OAuth
+    // Нет кода — начинаем OAuth
     if (!code) {
         const redirectUri = `https://${APP_DOMAIN}/install`;
         const authUrl = `https://${BITRIX_DOMAIN}/oauth/authorize/`
             + `?client_id=${CLIENT_ID}`
             + `&response_type=code`
             + `&redirect_uri=${encodeURIComponent(redirectUri)}`;
-        console.log('🔐 Redirecting to OAuth:', authUrl);
+        console.log('🔐 OAuth redirect →', authUrl);
         return res.redirect(authUrl);
     }
 
-    console.log('✅ OAuth callback received, domain:', domain);
+    console.log('✅ OAuth callback, domain:', domain);
 
     try {
         // Получаем access_token
         const tokenResp = await axios.post(
-            'https://oauth.bitrix.info/oauth/token/',
-            null,
-            {
-                params: {
-                    grant_type:    'authorization_code',
-                    client_id:     CLIENT_ID,
-                    client_secret: CLIENT_SECRET,
-                    code,
-                    redirect_uri:  `https://${APP_DOMAIN}/install`,
-                }
-            }
+            'https://oauth.bitrix.info/oauth/token/', null,
+            { params: {
+                grant_type:    'authorization_code',
+                client_id:     CLIENT_ID,
+                client_secret: CLIENT_SECRET,
+                code,
+                redirect_uri:  `https://${APP_DOMAIN}/install`,
+            }}
         );
 
         const { access_token, refresh_token } = tokenResp.data;
@@ -271,33 +282,32 @@ app.get('/install', async (req, res) => {
             { params: { auth: access_token } }
         );
 
-        const botId = botResp.data?.result;
+        const botId = String(botResp.data?.result || '');
         console.log('✅ Bot registered, ID:', botId);
 
-        // Сохраняем токены портала в памяти
-        portals[domain] = { access_token, refresh_token, bot_id: botId };
+        // ★ Сохраняем токены в БД — переживут перезапуск Render
+        await savePortal(domain, access_token, refresh_token, botId);
+        console.log('✅ Portal saved to DB:', domain);
 
         res.send(`<!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <title>Бот установлен!</title>
+    <meta charset="UTF-8"><title>Установлено!</title>
     <style>
-        body { font-family: Arial, sans-serif; background: #e8f5e9;
+        body { font-family:Arial,sans-serif; background:#e8f5e9;
                display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
         .card { background:white; border-radius:16px; padding:40px; text-align:center;
                 box-shadow:0 8px 24px rgba(0,0,0,0.1); max-width:480px; }
         h1 { color:#2e7d32; }
         .btn { display:inline-block; margin-top:20px; padding:14px 28px;
-               background:#2d8cff; color:white; border-radius:8px;
-               text-decoration:none; font-size:16px; }
+               background:#2d8cff; color:white; border-radius:8px; text-decoration:none; }
     </style>
 </head>
 <body>
 <div class="card">
     <h1>🎉 Бот установлен!</h1>
-    <p>Бот <strong>"Учёт времени"</strong> появился в чатах Битрикс24.</p>
-    <p>Найдите его в списке чатов и напишите <strong>"помощь"</strong> для начала работы.</p>
+    <p>Бот <strong>"Учёт времени"</strong> появился в чатах.</p>
+    <p>Найдите его и напишите <strong>"помощь"</strong>.</p>
     <a href="https://${domain}" class="btn">Перейти в Битрикс24</a>
 </div>
 </body>
@@ -305,26 +315,8 @@ app.get('/install', async (req, res) => {
 
     } catch (err) {
         console.error('❌ Install error:', err.response?.data || err.message);
-        const detail = err.response?.data?.error_description || err.message;
-        res.send(`<!DOCTYPE html>
-<html lang="ru">
-<head><meta charset="UTF-8"><title>Ошибка</title>
-<style>body{font-family:Arial,sans-serif;background:#fce4ec;
-display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;}
-.card{background:white;border-radius:16px;padding:40px;text-align:center;
-box-shadow:0 8px 24px rgba(0,0,0,0.1);max-width:480px;}
-h1{color:#c62828;} pre{background:#f5f5f5;padding:12px;border-radius:8px;text-align:left;font-size:13px;}
-.btn{display:inline-block;margin-top:20px;padding:14px 28px;
-background:#dc3545;color:white;border-radius:8px;text-decoration:none;}</style>
-</head>
-<body>
-<div class="card">
-    <h1>❌ Ошибка установки</h1>
-    <pre>${detail}</pre>
-    <a href="/install" class="btn">Попробовать снова</a>
-</div>
-</body>
-</html>`);
+        const detail = JSON.stringify(err.response?.data || err.message, null, 2);
+        res.status(500).send(`<pre>Ошибка установки:\n${detail}</pre>`);
     }
 });
 
@@ -335,9 +327,7 @@ background:#dc3545;color:white;border-radius:8px;text-decoration:none;}</style>
 app.get('/geo', (req, res) => {
     const { token } = req.query;
     if (!token) return res.status(400).send('Токен не найден');
-
-    // Экранируем токен для вставки в JS
-    const safeToken = token.replace(/['"\\]/g, '');
+    const safeToken = token.replace(/['"\\<>]/g, '');
 
     res.send(`<!DOCTYPE html>
 <html lang="ru">
@@ -346,28 +336,18 @@ app.get('/geo', (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Отметка присутствия</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-            background: #f0f4ff;
-            display: flex; align-items: center; justify-content: center;
-            min-height: 100vh;
-        }
-        .card {
-            background: white; border-radius: 24px;
-            padding: 48px 32px; text-align: center;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.12);
-            max-width: 340px; width: 90%;
-        }
-        .icon { font-size: 56px; margin-bottom: 20px; }
-        h2 { font-size: 22px; color: #1a1a2e; margin-bottom: 8px; }
-        p { font-size: 14px; color: #666; line-height: 1.5; }
-        .spinner {
-            width: 40px; height: 40px; margin: 16px auto;
-            border: 4px solid #e0e0e0; border-top-color: #2d8cff;
-            border-radius: 50%; animation: spin 0.8s linear infinite;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { font-family:-apple-system,sans-serif; background:#f0f4ff;
+               display:flex; align-items:center; justify-content:center; min-height:100vh; }
+        .card { background:white; border-radius:24px; padding:48px 32px; text-align:center;
+                box-shadow:0 8px 32px rgba(0,0,0,0.12); max-width:340px; width:90%; }
+        .icon { font-size:56px; margin-bottom:20px; }
+        h2 { font-size:22px; color:#1a1a2e; margin-bottom:8px; }
+        p  { font-size:14px; color:#666; line-height:1.5; }
+        .spinner { width:40px; height:40px; margin:16px auto;
+                   border:4px solid #e0e0e0; border-top-color:#2d8cff;
+                   border-radius:50%; animation:spin 0.8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
     </style>
 </head>
 <body>
@@ -375,7 +355,7 @@ app.get('/geo', (req, res) => {
     <div class="icon" id="icon">📍</div>
     <h2 id="title">Определяем местоположение...</h2>
     <div class="spinner" id="spinner"></div>
-    <p id="msg">Пожалуйста, разрешите доступ к геолокации когда браузер спросит</p>
+    <p id="msg">Разрешите доступ к геолокации когда браузер спросит</p>
 </div>
 <script>
 function done(icon, title, msg) {
@@ -384,48 +364,37 @@ function done(icon, title, msg) {
     document.getElementById('msg').textContent   = msg;
     document.getElementById('spinner').style.display = 'none';
 }
-
 if (!navigator.geolocation) {
-    done('❌', 'Нет поддержки', 'Ваш браузер не поддерживает геолокацию. Попробуйте Chrome или Safari.');
+    done('❌','Нет поддержки','Попробуйте Chrome или Safari');
 } else {
     navigator.geolocation.getCurrentPosition(
         function(pos) {
-            done('⏳', 'Отправляем данные...', 'Подождите секунду');
+            done('⏳','Отправляем данные...','Подождите');
             fetch('/confirm-geo', {
-                method:  'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({
-                    token: '${safeToken}',
-                    lat:   pos.coords.latitude,
-                    lon:   pos.coords.longitude,
-                })
+                method:'POST',
+                headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({ token:'${safeToken}', lat:pos.coords.latitude, lon:pos.coords.longitude })
             })
-            .then(function(r) { return r.json(); })
-            .then(function(d) {
+            .then(function(r){ return r.json(); })
+            .then(function(d){
                 if (d.ok) {
-                    if (d.in_office) {
-                        done('✅', 'Отметка принята!', 'Вы в офисе. Страница закроется автоматически.');
-                    } else {
-                        done('⚠️', 'Отметка принята', 'Вы вне офиса. Руководитель получил уведомление.');
-                    }
+                    done(d.in_office?'✅':'⚠️',
+                         d.in_office?'Отметка принята!':'Отметка принята',
+                         d.in_office?'Вы в офисе. Можно закрыть страницу.':'Вы вне офиса. Руководитель уведомлён.');
                 } else {
-                    done('❌', 'Ошибка', d.error || 'Попробуйте ещё раз.');
+                    done('❌','Ошибка', d.error||'Попробуйте ещё раз');
                 }
-                setTimeout(function() { window.close(); }, 3000);
+                setTimeout(function(){ window.close(); }, 3000);
             })
-            .catch(function() {
-                done('❌', 'Ошибка сети', 'Проверьте подключение к интернету и попробуйте снова.');
-            });
+            .catch(function(){ done('❌','Ошибка сети','Проверьте подключение'); });
         },
         function(err) {
-            var msgs = {
-                1: 'Вы запретили доступ к геолокации. Разрешите в настройках браузера и обновите страницу.',
-                2: 'Не удалось определить местоположение. Убедитесь что GPS включён.',
-                3: 'Превышено время ожидания. Обновите страницу и попробуйте снова.',
-            };
-            done('❌', 'Геолокация недоступна', msgs[err.code] || 'Неизвестная ошибка: ' + err.message);
+            var msgs = {1:'Запретили геолокацию — разрешите в настройках браузера.',
+                        2:'Не удалось определить местоположение.',
+                        3:'Превышено время ожидания.'};
+            done('❌','Геолокация недоступна', msgs[err.code]||'Ошибка: '+err.message);
         },
-        { timeout: 15000, enableHighAccuracy: true, maximumAge: 0 }
+        { timeout:15000, enableHighAccuracy:true, maximumAge:0 }
     );
 }
 </script>
@@ -439,77 +408,81 @@ if (!navigator.geolocation) {
 
 app.post('/confirm-geo', async (req, res) => {
     const { token, lat, lon } = req.body;
-
-    if (!token || lat == null || lon == null) {
-        return res.json({ ok: false, error: 'Неверные данные' });
-    }
+    if (!token || lat == null || lon == null)
+        return res.json({ ok:false, error:'Неверные данные' });
 
     const rec = await popGeoToken(token);
-    if (!rec) {
-        return res.json({ ok: false, error: 'Ссылка устарела или уже была использована. Запроси новую в боте.' });
-    }
+    if (!rec)
+        return res.json({ ok:false, error:'Ссылка устарела или уже использована. Запроси новую в боте.' });
 
     const inOffice  = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON) <= OFFICE_RADIUS;
     const typeLabel = rec.type === 'in' ? 'Приход' : 'Уход';
-    const time      = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
     const emoji     = rec.type === 'in' ? '✅' : '🚪';
-    const locLabel  = inOffice ? '📍 В офисе' : '⚠️ Вне офиса';
+    const time      = new Date().toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit' });
 
-    // Сохраняем отметку
     await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, inOffice);
 
-    // Сообщаем сотруднику в чат
-    await sendMessage(
-        rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
-        `${emoji} ${typeLabel} зафиксирован в ${time}\n${locLabel}`
+    await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
+        `${emoji} ${typeLabel} зафиксирован в ${time}\n` +
+        (inOffice ? '📍 В офисе' : '⚠️ Вне офиса')
     );
 
-    // Если вне офиса — уведомляем руководителя
     if (!inOffice) {
-        await notifyManager(
-            rec.domain, rec.access_token,
+        await notifyManager(rec.domain, rec.access_token,
             `⚠️ ${rec.user_name} — ${typeLabel.toLowerCase()} вне офиса в ${time}\n` +
             `Координаты: ${parseFloat(lat).toFixed(5)}, ${parseFloat(lon).toFixed(5)}`
         );
     }
 
-    console.log(`✅ [${rec.domain}] ${rec.user_name} — ${typeLabel} в ${time}, в офисе: ${inOffice}`);
-    res.json({ ok: true, in_office: inOffice });
+    console.log(`✅ ${rec.user_name} — ${typeLabel} в ${time}, в офисе: ${inOffice}`);
+    res.json({ ok:true, in_office:inOffice });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ВЕБХУК БОТА — приём событий от Битрикс24
+//  ВЕБХУК БОТА
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/imbot', async (req, res) => {
-    // Всегда отвечаем быстро — Битрикс ждёт не более 5 секунд
-    res.json({ result: 'ok' });
+    res.json({ result:'ok' }); // отвечаем немедленно
 
     try {
         const { event, data, auth } = req.body;
         if (!event || !data?.PARAMS) return;
 
         const { MESSAGE, DIALOG_ID, BOT_ID, FROM_USER_ID, USER_NAME } = data.PARAMS;
+        const domain   = auth?.domain;
+        let   authToken = auth?.access_token;
         const userName  = USER_NAME || `Пользователь ${FROM_USER_ID}`;
         const cleanMsg  = (MESSAGE || '').toLowerCase().trim();
-        const domain    = auth?.domain;
-        const authToken = auth?.access_token;
         const geoUrl    = `https://${APP_DOMAIN}/geo`;
 
-        console.log(`💬 [${domain}] ${userName}: "${MESSAGE}" (event: ${event})`);
+        console.log(`💬 [${domain}] ${userName}: "${MESSAGE}" (${event})`);
 
-        // Обновляем токен портала если он изменился
+        // ★ Обновляем токен в БД при каждом входящем запросе
         if (domain && authToken) {
-            if (!portals[domain]) portals[domain] = {};
-            portals[domain].access_token = authToken;
-            portals[domain].bot_id       = BOT_ID;
+            const existing = await getPortal(domain);
+            await savePortal(domain, authToken, existing?.refresh_token, BOT_ID || existing?.bot_id);
         }
+
+        // Если токен от Битрикс24 устарел — берём из БД
+        if (!authToken) {
+            const portal = await getPortal(domain);
+            if (portal) {
+                authToken = portal.access_token;
+                console.log('🔑 Используем сохранённый токен для', domain);
+            } else {
+                console.error('❌ Нет токена для домена', domain);
+                return;
+            }
+        }
+
+        const botId = BOT_ID || (await getPortal(domain))?.bot_id;
 
         // ── Приветствие при первом входе в чат ────────────────────
         if (event === 'ONIMBOTJOINCHAT') {
-            await sendMessage(domain, authToken, BOT_ID, DIALOG_ID,
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `👋 Привет, ${userName}!\n\n` +
-                `Я помогаю фиксировать присутствие в офисе.\n\n` +
+                `Я фиксирую присутствие сотрудников в офисе.\n\n` +
                 `Команды:\n` +
                 `• "пришел" — отметить приход\n` +
                 `• "ушел" — отметить уход\n` +
@@ -521,85 +494,74 @@ app.post('/imbot', async (req, res) => {
 
         if (event !== 'ONIMBOTMESSAGEADD') return;
 
-        // ── Команда: пришел ────────────────────────────────────────
+        // ── пришел ────────────────────────────────────────────────
         if (cleanMsg === 'пришел' || cleanMsg === 'пришёл') {
             const token = makeToken();
-            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, BOT_ID, domain, authToken, 'in');
-            await sendMessage(domain, authToken, BOT_ID, DIALOG_ID,
-                `📍 Нажми на ссылку ниже — откроется страница геолокации.\n` +
-                `Разреши доступ к местоположению и отметка зафиксируется автоматически.\n\n` +
+            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'in');
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `📍 Нажми на ссылку — откроется страница геолокации.\n` +
+                `Разреши доступ к местоположению и отметка зафиксируется.\n\n` +
                 `👉 ${geoUrl}?token=${token}\n\n` +
                 `_Ссылка действительна 10 минут_`
             );
 
-        // ── Команда: ушел ──────────────────────────────────────────
+        // ── ушел ──────────────────────────────────────────────────
         } else if (cleanMsg === 'ушел' || cleanMsg === 'ушёл') {
-            const marks = await getTodayMarks(FROM_USER_ID);
-            const hasIn = marks.some(m => m.type === 'in');
+            const marks  = await getTodayMarks(FROM_USER_ID);
+            const hasIn  = marks.some(m => m.type === 'in');
+            const hasOut = marks.some(m => m.type === 'out');
 
             if (!hasIn) {
-                await sendMessage(domain, authToken, BOT_ID, DIALOG_ID,
-                    `⚠️ Нет отметки прихода сегодня.\nСначала напиши "пришел".`
-                );
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    `⚠️ Нет отметки прихода сегодня.\nСначала напиши "пришел".`);
                 return;
             }
-
-            const hasOut = marks.some(m => m.type === 'out');
             if (hasOut) {
-                await sendMessage(domain, authToken, BOT_ID, DIALOG_ID,
-                    `ℹ️ Уход уже отмечен сегодня.\nНапиши "статус" чтобы посмотреть отметки.`
-                );
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    `ℹ️ Уход уже отмечен сегодня.\nНапиши "статус" чтобы посмотреть.`);
                 return;
             }
 
             const token = makeToken();
-            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, BOT_ID, domain, authToken, 'out');
-            await sendMessage(domain, authToken, BOT_ID, DIALOG_ID,
+            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'out');
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `📍 Нажми на ссылку чтобы подтвердить уход:\n\n` +
                 `👉 ${geoUrl}?token=${token}\n\n` +
                 `_Ссылка действительна 10 минут_`
             );
 
-        // ── Команда: статус ────────────────────────────────────────
+        // ── статус ────────────────────────────────────────────────
         } else if (cleanMsg === 'статус') {
             const marks = await getTodayMarks(FROM_USER_ID);
-
             if (marks.length === 0) {
-                await sendMessage(domain, authToken, BOT_ID, DIALOG_ID,
-                    `📊 Сегодня отметок нет.\nНапиши "пришел" когда придёшь в офис.`
-                );
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    `📊 Сегодня отметок нет.\nНапиши "пришел" когда придёшь в офис.`);
             } else {
                 const lines = marks.map(m => {
-                    const t   = new Date(m.timestamp + 'Z').toLocaleTimeString('ru-RU', {
-                        hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg'
-                    });
+                    const t   = new Date(m.timestamp + 'Z').toLocaleTimeString('ru-RU',
+                        { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' });
                     const tp  = m.type === 'in' ? '✅ Приход' : '🚪 Уход';
                     const loc = m.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
                     return `${tp} в ${t} — ${loc}`;
                 }).join('\n');
-
-                await sendMessage(domain, authToken, BOT_ID, DIALOG_ID,
-                    `📊 Твои отметки сегодня:\n\n${lines}`
-                );
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    `📊 Твои отметки сегодня:\n\n${lines}`);
             }
 
-        // ── Команда: помощь ────────────────────────────────────────
+        // ── помощь ────────────────────────────────────────────────
         } else if (cleanMsg === 'помощь') {
-            await sendMessage(domain, authToken, BOT_ID, DIALOG_ID,
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `🤖 Бот учёта посещаемости\n\n` +
-                `Команды:\n` +
-                `• "пришел" — отметить приход (нужно разрешить геолокацию)\n` +
+                `• "пришел" — отметить приход (нужна геолокация)\n` +
                 `• "ушел" — отметить уход\n` +
                 `• "статус" — отметки за сегодня\n` +
-                `• "помощь" — эта справка\n\n` +
-                `При нажатии на ссылку откроется браузер — разреши доступ к местоположению.`
+                `• "помощь" — эта справка`
             );
 
-        // ── Неизвестная команда ────────────────────────────────────
+        // ── неизвестная команда ────────────────────────────────────
         } else {
-            await sendMessage(domain, authToken, BOT_ID, DIALOG_ID,
-                `❓ Не понимаю "${MESSAGE}".\nНапиши "помощь" для списка команд.`
-            );
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `❓ Не понимаю "${MESSAGE}".\nНапиши "помощь" для списка команд.`);
         }
 
     } catch (err) {
@@ -614,70 +576,38 @@ app.post('/imbot', async (req, res) => {
 // Чистим устаревшие гео-токены каждые 15 минут
 cron.schedule('*/15 * * * *', () => {
     db.run(`DELETE FROM geo_tokens WHERE created_at < datetime('now', '-15 minutes')`);
-    console.log('🧹 Устаревшие токены очищены');
-});
-
-// 09:35 пн-пт — уведомляем руководителя о не отметившихся
-// Работает только если настроен BITRIX_WEBHOOK
-cron.schedule('35 4 * * 1-5', async () => { // 04:35 UTC = 09:35 Тюмень (UTC+5)
-    if (!BITRIX_WEBHOOK) return;
-    console.log('⏰ Проверяем кто не отметился...');
-    try {
-        const resp  = await axios.get(`${BITRIX_WEBHOOK}user.get`, { params: { ACTIVE: true } });
-        const users = resp.data?.result || [];
-        const late  = [];
-
-        for (const user of users) {
-            const marks = await getTodayMarks(String(user.ID));
-            if (marks.length === 0) {
-                late.push(`• ${user.NAME} ${user.LAST_NAME}`);
-            }
-        }
-
-        if (late.length > 0) {
-            await axios.post(`${BITRIX_WEBHOOK}im.notify.system.add`, {
-                USER_ID: MANAGER_ID,
-                MESSAGE: `🔴 Не отметились к 9:30 (${new Date().toLocaleDateString('ru-RU')}):\n${late.join('\n')}`,
-            });
-        }
-    } catch (err) {
-        console.error('❌ Late check error:', err.message);
-    }
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  ВСПОМОГАТЕЛЬНЫЕ МАРШРУТЫ
 // ═════════════════════════════════════════════════════════════════════════════
 
-// Главная — страница установки
 app.get('/', (req, res) => {
     res.send(`<!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Бот учёта времени</title>
     <style>
-        body { font-family: Arial, sans-serif; background: linear-gradient(135deg,#667eea,#764ba2);
+        body { font-family:Arial,sans-serif; background:linear-gradient(135deg,#667eea,#764ba2);
                min-height:100vh; margin:0; display:flex; align-items:center; justify-content:center; }
         .card { background:white; border-radius:16px; padding:40px; max-width:500px; width:90%;
                 box-shadow:0 10px 40px rgba(0,0,0,0.2); }
         h1 { color:#2d8cff; margin-bottom:8px; }
         .btn { display:inline-block; margin-top:24px; padding:16px 32px;
-               background:#2d8cff; color:white; border-radius:50px; text-decoration:none;
-               font-size:18px; font-weight:bold; }
+               background:#2d8cff; color:white; border-radius:50px;
+               text-decoration:none; font-size:18px; font-weight:bold; }
         ul { margin-top:16px; padding-left:20px; line-height:2; }
     </style>
 </head>
 <body>
 <div class="card">
     <h1>🤖 Бот учёта рабочего времени</h1>
-    <p>Автоматическая фиксация прихода и ухода сотрудников с проверкой геолокации.</p>
+    <p>Фиксация прихода и ухода с проверкой геолокации.</p>
     <ul>
         <li>📍 Геолокация при каждой отметке</li>
         <li>⚠️ Уведомление если сотрудник вне офиса</li>
         <li>📊 Статус за текущий день</li>
-        <li>🔔 Уведомления руководителю</li>
     </ul>
     <a href="/install" class="btn">📥 Установить в Битрикс24</a>
 </div>
@@ -685,23 +615,23 @@ app.get('/', (req, res) => {
 </html>`);
 });
 
-// Статус сервера (для UptimeRobot и проверки)
-app.get('/status', (req, res) => {
+app.get('/status', async (req, res) => {
+    const portalsInDb = await new Promise(r => {
+        db.all(`SELECT domain, bot_id, updated_at FROM portals`, [], (e, rows) => r(rows || []));
+    });
     res.json({
         ok:      true,
-        service: 'Bitrix24 Attendance Bot',
+        service: 'Bitrix24 Attendance Bot v3',
         domain:  APP_DOMAIN,
         office:  `${OFFICE_LAT}, ${OFFICE_LON} (радиус ${OFFICE_RADIUS}м)`,
-        webhook: BITRIX_WEBHOOK ? '✅ настроен' : '⏳ ожидаем от заказчика',
-        portals: Object.keys(portals),
+        portals: portalsInDb,
         time:    new Date().toISOString(),
     });
 });
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
 app.listen(port, '0.0.0.0', () => {
-    console.log(`🚀 Сервер запущен: https://${APP_DOMAIN}`);
+    console.log(`🚀 Сервер: https://${APP_DOMAIN}`);
     console.log(`📍 Офис: ${OFFICE_LAT}, ${OFFICE_LON} (${OFFICE_RADIUS}м)`);
-    console.log(`🔗 Вебхук: ${BITRIX_WEBHOOK || '⏳ не настроен'}`);
     console.log('=== ✅ READY ===');
 });
