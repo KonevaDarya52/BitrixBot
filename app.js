@@ -195,7 +195,8 @@ app.post('/install', async (req, res) => {
     console.log('📥 POST /install — тело запроса:', JSON.stringify(req.body));
 
     const { AUTH_ID, AUTH_EXPIRES, REFRESH_ID, member_id, DOMAIN, PROTOCOL } = req.body;
-    const domain = DOMAIN || req.body.domain || '';
+    // Домен может прийти в теле запроса ИЛИ в URL параметрах
+    const domain = DOMAIN || req.body.domain || req.query.DOMAIN || req.query.domain || '';
 
     // Битрикс24 присылает AUTH_ID как access_token при переустановке
     if (AUTH_ID && domain) {
