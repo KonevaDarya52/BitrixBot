@@ -191,8 +191,20 @@ function popGeoToken(token) {
 //  УСТАНОВКА — POST (Битрикс24 открывает приложение внутри себя)
 // ═════════════════════════════════════════════════════════════════════════════
 
-app.post('/install', (req, res) => {
-    console.log('📥 POST /install от Битрикс24');
+app.post('/install', async (req, res) => {
+    console.log('📥 POST /install — тело запроса:', JSON.stringify(req.body));
+
+    const { AUTH_ID, AUTH_EXPIRES, REFRESH_ID, member_id, DOMAIN, PROTOCOL } = req.body;
+    const domain = DOMAIN || req.body.domain || '';
+
+    // Битрикс24 присылает AUTH_ID как access_token при переустановке
+    if (AUTH_ID && domain) {
+        console.log('🔑 Получен токен через POST /install для домена:', domain);
+        const existing = await getPortal(domain);
+        await savePortal(domain, AUTH_ID, REFRESH_ID || '', existing?.bot_id || '');
+        console.log('✅ Токен сохранён в БД из POST /install');
+    }
+
     res.send(`<!DOCTYPE html>
 <html lang="ru">
 <head>
