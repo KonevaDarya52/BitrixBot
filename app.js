@@ -635,3 +635,24 @@ app.listen(port, '0.0.0.0', () => {
     console.log(`📍 Офис: ${OFFICE_LAT}, ${OFFICE_LON} (${OFFICE_RADIUS}м)`);
     console.log('=== ✅ READY ===');
 });
+
+// Диагностика — проверяет токен и пробует отправить уведомление
+app.get('/test-bot', async (req, res) => {
+    const portal = await getPortal('b24-etqwns.bitrix24.ru');
+    if (!portal) {
+        return res.json({ ok: false, error: 'Портал не найден в БД. Переустановите бота.' });
+    }
+    const me = await callBitrix('b24-etqwns.bitrix24.ru', portal.access_token, 'profile', {});
+    const notify = await callBitrix('b24-etqwns.bitrix24.ru', portal.access_token, 'im.notify.system.add', {
+        USER_ID: MANAGER_ID,
+        MESSAGE: '🔧 Тест бота: если видите это — уведомления работают!'
+    });
+    res.json({
+        portal_found:  true,
+        bot_id:        portal.bot_id,
+        token_updated: portal.updated_at,
+        profile_check: me?.result ? '✅ Токен валидный' : '❌ Токен недействителен',
+        notify_result: notify?.result ? '✅ Уведомление отправлено' : '❌ Ошибка отправки',
+        profile_name:  me?.result ? `${me.result.NAME} ${me.result.LAST_NAME}` : null,
+    });
+});
