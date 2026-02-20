@@ -650,6 +650,87 @@ app.listen(port, '0.0.0.0', () => {
 });
 
 
+
+// ═══════════════════════════════════════════════════════════════════════
+//  /setup — полная переустановка за один шаг (вызывать после деплоя)
+// ═══════════════════════════════════════════════════════════════════════
+app.get('/setup', async (req, res) => {
+    const log = [];
+    
+    try {
+        // Шаг 1: Получаем новый токен через client_credentials
+        log.push('1️⃣ Получаем токен...');
+        const tokenResp = await axios.post(
+            'https://oauth.bitrix.info/oauth/token/', null,
+            { params: {
+                grant_type:    'client_credentials',
+                client_id:     CLIENT_ID,
+                client_secret: CLIENT_SECRET,
+            }}
+        );
+        
+        const { access_token, refresh_token } = tokenResp.data;
+        if (!access_token) throw new Error('Не получили токен: ' + JSON.stringify(tokenResp.data));
+        log.push('✅ Токен получен');
+
+        // Шаг 2: Проверяем профиль
+        const profile = await callBitrix(BITRIX_DOMAIN, access_token, 'profile', {});
+        log.push('✅ Профиль: ' + (profile?.result?.NAME || 'неизвестно'));
+
+        // Шаг 3: Получаем список ботов
+        const botsResp = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.bot.list', {});
+        const bots = botsResp?.result || [];
+        log.push('📋 Ботов найдено: ' + bots.length);
+
+        let botId = '';
+        
+        if (bots.length > 0) {
+            // Бот уже есть — берём его ID
+            const ourBot = bots.find(b => b.CODE === 'attendance_bot') || bots[0];
+            botId = String(ourBot.ID);
+            log.push('✅ Бот уже существует, ID: ' + botId);
+
+            // Обновляем EVENT_MESSAGE_ADD на случай если URL изменился
+            await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.bot.update', {
+                BOT_ID: botId,
+                FIELDS: {
+                    EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
+                    EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
+                }
+            });
+            log.push('✅ Вебхук бота обновлён');
+        } else {
+            // Бота нет — регистрируем
+            log.push('2️⃣ Регистрируем бота...');
+            const botResp = await callBitrix(BITRIX_DOMAIN, access_token, 'imbot.register', {
+                CODE:                  'attendance_bot',
+                TYPE:                  'H',
+                EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
+                EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
+                EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
+                PROPERTIES: {
+                    NAME:          'Учёт времени',
+                    COLOR:         'GREEN',
+                    DESCRIPTION:   'Бот учёта присутствия сотрудников',
+                    WORK_POSITION: 'Помощник HR',
+                }
+            });
+            botId = String(botResp?.result || '');
+            log.push('✅ Бот зарегистрирован, ID: ' + botId);
+        }
+
+        // Шаг 4: Сохраняем всё в БД
+        await savePortal(BITRIX_DOMAIN, access_token, refresh_token || '', botId);
+        log.push('✅ Портал сохранён в БД');
+
+        res.json({ ok: true, log, bot_id: botId, domain: BITRIX_DOMAIN });
+
+    } catch (err) {
+        log.push('❌ Ошибка: ' + (err.response?.data ? JSON.stringify(err.response.data) : err.message));
+        res.json({ ok: false, log, error: err.message });
+    }
+});
+
 // Диагностика и починка bot_id
 app.get('/fix-bot', async (req, res) => {
     const portal = await getPortal('b24-etqwns.bitrix24.ru');
