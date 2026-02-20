@@ -438,11 +438,15 @@ app.post('/confirm-geo', async (req, res) => {
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/imbot', async (req, res) => {
-    res.json({ result:'ok' }); // отвечаем немедленно
+    res.json({ result:'ok' });
+    console.log('📨 /imbot RAW:', JSON.stringify(req.body));  // отвечаем немедленно
 
     try {
         const { event, data, auth } = req.body;
         if (!event || !data?.PARAMS) return;
+                    console.log('⚠️ /imbot — нет event или data.PARAMS, выходим');
+                      // ← и эту
+
 
         const { MESSAGE, DIALOG_ID, BOT_ID, FROM_USER_ID, USER_NAME } = data.PARAMS;
         const domain    = auth?.domain;
