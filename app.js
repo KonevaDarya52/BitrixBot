@@ -20,7 +20,7 @@ const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
 // ─── База данных ──────────────────────────────────────────────────────────────
 const db = new sqlite3.Database(path.join(__dirname, 'attendance.db'));
 
-db.serialize(() => {
+db.serialize(() => { 
     db.run(`CREATE TABLE IF NOT EXISTS attendance (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id     TEXT NOT NULL,
