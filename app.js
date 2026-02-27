@@ -270,18 +270,24 @@ app.post('/install', async (req, res) => {
     if (AUTH_ID && domain) {
         console.log('🔑 Токен получен для домена:', domain);
 
-        // Сохраняем токены сразу
-        await savePortal(domain, AUTH_ID, REFRESH_ID, '', SERVER_ENDPOINT);
-
-        // Проверяем, нет ли уже зарегистрированного бота
+        // Проверяем, есть ли уже зарегистрированный бот в Битрикс24
         const botsResp = await callBitrix(domain, AUTH_ID, 'imbot.bot.list', {});
         const botsArr  = Object.values(botsResp?.result || {});
         const ourBot   = botsArr.find(b => b.CODE === 'attendance_bot');
-        const oldBotId = ourBot ? String(ourBot.ID) : null;
 
-        const botId = await registerBot(domain, AUTH_ID, oldBotId);
-        if (botId) {
-            await savePortal(domain, AUTH_ID, REFRESH_ID, botId, SERVER_ENDPOINT);
+        if (ourBot) {
+            // Бот уже есть — просто обновляем токен, бота не трогаем
+            const existingBotId = String(ourBot.ID);
+            console.log(`✅ Бот уже зарегистрирован (ID=${existingBotId}), обновляем токен`);
+            await savePortal(domain, AUTH_ID, REFRESH_ID, existingBotId, SERVER_ENDPOINT);
+        } else {
+            // Бота нет — регистрируем впервые
+            console.log('🤖 Бот не найден, регистрируем...');
+            await savePortal(domain, AUTH_ID, REFRESH_ID, '', SERVER_ENDPOINT);
+            const botId = await registerBot(domain, AUTH_ID, null);
+            if (botId) {
+                await savePortal(domain, AUTH_ID, REFRESH_ID, botId, SERVER_ENDPOINT);
+            }
         }
     } else {
         console.warn('⚠️ /install — нет AUTH_ID или domain:', { AUTH_ID: !!AUTH_ID, domain });
