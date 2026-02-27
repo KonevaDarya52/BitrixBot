@@ -8,10 +8,10 @@ const cron    = require('node-cron');
 const app  = express();
 const port = process.env.PORT || 10000;
 
-const APP_DOMAIN    = process.env.APP_DOMAIN            || 'bitrixbot-bnnd.onrender.com';
-const BITRIX_DOMAIN = process.env.BITRIX_DOMAIN         || 'b24-cviqlp.bitrix24.ru';
-const CLIENT_ID     = process.env.BITRIX_CLIENT_ID      || 'local.699ef5d96dc8a3.90486015'; // ВАШ РЕАЛЬНЫЙ CLIENT_ID
-const CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET  || 'mBn7t9j3UF53bEOpp0fQ5S5favymHeguNh1d72U4E0KOaNb3kQ';
+const APP_DOMAIN    = process.env.APP_DOMAIN           || 'bitrixbot-bnnd.onrender.com';
+const BITRIX_DOMAIN = process.env.BITRIX_DOMAIN        || 'b24-cviqlp.bitrix24.ru';
+const CLIENT_ID     = process.env.BITRIX_CLIENT_ID     || 'local.699ef5d96dc8a3.90486015';
+const CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET || 'mBn7t9j3UF53bEOpp0fQ5S5favymHeguNh1d72U4E0KOaNb3kQ';
 const OFFICE_LAT    = parseFloat(process.env.OFFICE_LAT    || '57.151929');
 const OFFICE_LON    = parseFloat(process.env.OFFICE_LON    || '65.592076');
 const OFFICE_RADIUS = parseInt(process.env.OFFICE_RADIUS   || '100');
@@ -20,7 +20,7 @@ const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
 // ─── База данных ──────────────────────────────────────────────────────────────
 const db = new sqlite3.Database(path.join(__dirname, 'attendance.db'));
 
-db.serialize(() => { 
+db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS attendance (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id     TEXT NOT NULL,
@@ -46,12 +46,12 @@ db.serialize(() => {
     )`);
 
     db.run(`CREATE TABLE IF NOT EXISTS portals (
-        domain        TEXT PRIMARY KEY,
-        access_token  TEXT NOT NULL,
-        refresh_token TEXT,
-        bot_id        TEXT,
+        domain          TEXT PRIMARY KEY,
+        access_token    TEXT NOT NULL,
+        refresh_token   TEXT,
+        bot_id          TEXT,
         client_endpoint TEXT,
-        updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
+        updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 });
 
@@ -71,20 +71,23 @@ function getDistance(lat1, lon1, lat2, lon2) {
     const R    = 6371000;
     const dLat = (lat2 - lat1) * Math.PI / 180;
     const dLon = (lon2 - lon1) * Math.PI / 180;
-    const a    = Math.sin(dLat/2) ** 2
-               + Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180)
-               * Math.sin(dLon/2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    const a    = Math.sin(dLat / 2) ** 2
+               + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180)
+               * Math.sin(dLon / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function makeToken() {
     return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+// ─── БД: порталы ─────────────────────────────────────────────────────────────
+
 function savePortal(domain, accessToken, refreshToken, botId, clientEndpoint) {
     return new Promise((resolve, reject) => {
         db.run(
-            `INSERT OR REPLACE INTO portals (domain, access_token, refresh_token, bot_id, client_endpoint, updated_at)
+            `INSERT OR REPLACE INTO portals
+             (domain, access_token, refresh_token, bot_id, client_endpoint, updated_at)
              VALUES (?, ?, ?, ?, ?, datetime('now'))`,
             [domain, accessToken, refreshToken || '', botId || '', clientEndpoint || ''],
             err => err ? reject(err) : resolve()
@@ -100,80 +103,13 @@ function getPortal(domain) {
     });
 }
 
-async function refreshToken(domain, refreshToken) {
-    try {
-        const resp = await axios.get('https://oauth.bitrix24.tech/oauth/token/', {
-            params: {
-                grant_type: 'refresh_token',
-                client_id: CLIENT_ID,
-                client_secret: CLIENT_SECRET,
-                refresh_token: refreshToken
-            }
-        });
-        
-        if (resp.data && resp.data.access_token) {
-            await savePortal(domain, resp.data.access_token, resp.data.refresh_token, null, resp.data.client_endpoint);
-            return resp.data.access_token;
-        }
-    } catch (err) {
-        console.error('❌ Ошибка обновления токена:', err.message);
-    }
-    return null;
-}
-
-async function callBitrix(domain, accessToken, method, params = {}) {
-    try {
-        // Определяем endpoint
-        let endpoint = `https://${domain}/rest/${method}`;
-        
-        // Проверяем, не является ли accessToken уже полным токеном с oauth.bitrix24.tech
-        if (accessToken && accessToken.includes('.')) {
-            // Возможно это токен приложения, пробуем оба варианта
-        }
-        
-        const resp = await axios.post(
-            endpoint,
-            params,
-            { params: { auth: accessToken }, timeout: 10000 }
-        );
-        return resp.data;
-    } catch (err) {
-        if (err.response?.data?.error === 'expired_token') {
-            // Пробуем обновить токен
-            const portal = await getPortal(domain);
-            if (portal && portal.refresh_token) {
-                const newToken = await refreshToken(domain, portal.refresh_token);
-                if (newToken) {
-                    // Повторяем запрос с новым токеном
-                    return callBitrix(domain, newToken, method, params);
-                }
-            }
-        }
-        console.error(`❌ Bitrix API [${method}]:`, err.response?.data || err.message);
-        return null;
-    }
-}
-
-async function sendMessage(domain, accessToken, botId, dialogId, message) {
-    console.log(`📤 sendMessage → ${domain}, bot=${botId}, dialog=${dialogId}`);
-    return callBitrix(domain, accessToken, 'imbot.message.add', {
-        BOT_ID:    botId,
-        DIALOG_ID: dialogId,
-        MESSAGE:   message,
-    });
-}
-
-async function notifyManager(domain, accessToken, text) {
-    return callBitrix(domain, accessToken, 'im.notify.system.add', {
-        USER_ID: MANAGER_ID,
-        MESSAGE: text,
-    });
-}
+// ─── БД: посещаемость ────────────────────────────────────────────────────────
 
 function saveAttendance(userId, userName, domain, type, lat, lon, inOffice) {
     return new Promise((resolve, reject) => {
         db.run(
-            `INSERT INTO attendance (user_id, user_name, domain, type, latitude, longitude, in_office)
+            `INSERT INTO attendance
+             (user_id, user_name, domain, type, latitude, longitude, in_office)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
             [userId, userName, domain, type, lat, lon, inOffice ? 1 : 0],
             function(err) { err ? reject(err) : resolve(this.lastID); }
@@ -192,6 +128,8 @@ function getTodayMarks(userId) {
         );
     });
 }
+
+// ─── БД: гео-токены ──────────────────────────────────────────────────────────
 
 function saveGeoToken(token, userId, userName, dialogId, botId, domain, accessToken, type) {
     return new Promise((resolve, reject) => {
@@ -216,68 +154,137 @@ function popGeoToken(token) {
     });
 }
 
-// ─── ★ Подписка на события бота через event.bind ─────────────────────────────
-async function bindBotEvents(domain, accessToken) {
-    const handlerUrl = `https://${APP_DOMAIN}/imbot`;
-    const events = ['ONIMBOTMESSAGEADD', 'ONIMBOTJOINCHAT'];
-    const results = {};
+// ─── Bitrix24 API ─────────────────────────────────────────────────────────────
 
-    for (const event of events) {
-        const r = await callBitrix(domain, accessToken, 'event.bind', {
-            EVENT:   event,
-            HANDLER: handlerUrl,
+async function doRefreshToken(domain, rToken) {
+    try {
+        const resp = await axios.get('https://oauth.bitrix24.tech/oauth/token/', {
+            params: {
+                grant_type:    'refresh_token',
+                client_id:     CLIENT_ID,
+                client_secret: CLIENT_SECRET,
+                refresh_token: rToken,
+            }
         });
-        results[event] = r?.result ? '✅' : ('❌ ' + JSON.stringify(r));
-        console.log(`📎 event.bind ${event}:`, JSON.stringify(r));
+        if (resp.data?.access_token) {
+            const portal = await getPortal(domain);
+            await savePortal(domain, resp.data.access_token, resp.data.refresh_token,
+                portal?.bot_id, resp.data.client_endpoint);
+            console.log('🔄 Токен обновлён для', domain);
+            return resp.data.access_token;
+        }
+    } catch (err) {
+        console.error('❌ Ошибка обновления токена:', err.message);
     }
-    return results;
+    return null;
+}
+
+async function callBitrix(domain, accessToken, method, params = {}) {
+    try {
+        const resp = await axios.post(
+            `https://${domain}/rest/${method}`,
+            params,
+            { params: { auth: accessToken }, timeout: 10000 }
+        );
+        return resp.data;
+    } catch (err) {
+        if (err.response?.data?.error === 'expired_token') {
+            const portal = await getPortal(domain);
+            if (portal?.refresh_token) {
+                const newToken = await doRefreshToken(domain, portal.refresh_token);
+                if (newToken) return callBitrix(domain, newToken, method, params);
+            }
+        }
+        console.error(`❌ Bitrix API [${method}]:`, err.response?.data || err.message);
+        return null;
+    }
+}
+
+async function sendMessage(domain, accessToken, botId, dialogId, message) {
+    console.log(`📤 sendMessage → bot=${botId}, dialog=${dialogId}`);
+    return callBitrix(domain, accessToken, 'imbot.message.add', {
+        BOT_ID:    botId,
+        DIALOG_ID: dialogId,
+        MESSAGE:   message,
+    });
+}
+
+async function notifyManager(domain, accessToken, text) {
+    return callBitrix(domain, accessToken, 'im.notify.system.add', {
+        USER_ID: MANAGER_ID,
+        MESSAGE: text,
+    });
+}
+
+// ─── Регистрация / перерегистрация бота ──────────────────────────────────────
+// ВАЖНО: для imbot НЕ используем event.bind — события регистрируются только
+// через поля EVENT_MESSAGE_ADD / EVENT_WELCOME_MESSAGE в imbot.register
+
+async function registerBot(domain, accessToken, existingBotId) {
+    const handlerUrl = `https://${APP_DOMAIN}/imbot`;
+
+    // Если бот уже есть — сначала удаляем, чтобы обновить URL обработчика
+    if (existingBotId) {
+        console.log(`🗑 Удаляем старого бота ID=${existingBotId}...`);
+        await callBitrix(domain, accessToken, 'imbot.unregister', { BOT_ID: existingBotId });
+        await new Promise(r => setTimeout(r, 1500));
+    }
+
+    console.log('🤖 Регистрируем бота...');
+    const resp = await callBitrix(domain, accessToken, 'imbot.register', {
+        CODE:                  'attendance_bot',
+        TYPE:                  'H',
+        EVENT_MESSAGE_ADD:     handlerUrl,
+        EVENT_WELCOME_MESSAGE: handlerUrl,
+        EVENT_BOT_DELETE:      handlerUrl,
+        PROPERTIES: {
+            NAME:          'Учёт времени',
+            COLOR:         'GREEN',
+            DESCRIPTION:   'Бот учёта присутствия сотрудников',
+            WORK_POSITION: 'Помощник HR',
+        }
+    });
+
+    const botId = String(resp?.result || '');
+    if (botId) {
+        console.log('✅ Бот зарегистрирован, ID:', botId);
+    } else {
+        console.error('❌ Ошибка регистрации бота:', JSON.stringify(resp));
+    }
+    return botId;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  УСТАНОВКА — POST (Битрикс24 вызывает при установке/переустановке)
+//  УСТАНОВКА
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/install', async (req, res) => {
     console.log('📥 POST /install body:', JSON.stringify(req.body));
-    console.log('📥 POST /install query:', JSON.stringify(req.query));
 
-    const { AUTH_ID, REFRESH_ID, DOMAIN, SERVER_ENDPOINT } = req.body;
-    const domain = DOMAIN || req.body.domain || req.query.DOMAIN || req.query.domain || '';
+    const AUTH_ID        = req.body.AUTH_ID        || req.body.auth_id;
+    const REFRESH_ID     = req.body.REFRESH_ID     || req.body.refresh_id     || '';
+    const SERVER_ENDPOINT= req.body.SERVER_ENDPOINT|| req.body.server_endpoint|| '';
+    const domain         = req.body.DOMAIN         || req.body.domain
+                        || req.query.DOMAIN        || req.query.domain        || '';
 
     if (AUTH_ID && domain) {
         console.log('🔑 Токен получен для домена:', domain);
-        
-        // Сохраняем портал
-        await savePortal(domain, AUTH_ID, REFRESH_ID || '', '', SERVER_ENDPOINT);
-        console.log('✅ Токен сохранён в БД');
 
-        // Регистрируем бота с правильными параметрами
-        console.log('🤖 Регистрируем бота...');
-        const botResp = await callBitrix(domain, AUTH_ID, 'imbot.register', {
-            CODE:                  'attendance_bot',
-            TYPE:                  'H',
-            EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
-            EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
-            EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
-            PROPERTIES: {
-                NAME:          'Учёт времени',
-                COLOR:         'GREEN',
-                DESCRIPTION:   'Бот учёта присутствия сотрудников',
-                WORK_POSITION: 'Помощник HR',
-            }
-        });
-        
-        const botId = String(botResp?.result || '');
+        // Сохраняем токены сразу
+        await savePortal(domain, AUTH_ID, REFRESH_ID, '', SERVER_ENDPOINT);
+
+        // Проверяем, нет ли уже зарегистрированного бота
+        const botsResp = await callBitrix(domain, AUTH_ID, 'imbot.bot.list', {});
+        const botsArr  = Object.values(botsResp?.result || {});
+        const ourBot   = botsArr.find(b => b.CODE === 'attendance_bot');
+        const oldBotId = ourBot ? String(ourBot.ID) : null;
+
+        const botId = await registerBot(domain, AUTH_ID, oldBotId);
         if (botId) {
-            await savePortal(domain, AUTH_ID, REFRESH_ID || '', botId, SERVER_ENDPOINT);
-            console.log('✅ Бот зарегистрирован, ID:', botId);
-            
-            // Подписываемся на события
-            console.log('📎 Подписываемся на события бота...');
-            await bindBotEvents(domain, AUTH_ID);
-        } else {
-            console.error('❌ Не удалось зарегистрировать бота:', JSON.stringify(botResp));
+            await savePortal(domain, AUTH_ID, REFRESH_ID, botId, SERVER_ENDPOINT);
         }
+    } else {
+        console.warn('⚠️ /install — нет AUTH_ID или domain:', { AUTH_ID: !!AUTH_ID, domain });
     }
 
     res.send(`<!DOCTYPE html>
@@ -312,7 +319,7 @@ app.post('/install', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  СТРАНИЦА ГЕОЛОКАЦИИ (без изменений, оставляем как у вас)
+//  СТРАНИЦА ГЕОЛОКАЦИИ
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.get('/geo', (req, res) => {
@@ -394,22 +401,22 @@ if (!navigator.geolocation) {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ПОДТВЕРЖДЕНИЕ ГЕОЛОКАЦИИ (без изменений, оставляем как у вас)
+//  ПОДТВЕРЖДЕНИЕ ГЕОЛОКАЦИИ
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/confirm-geo', async (req, res) => {
     const { token, lat, lon } = req.body;
     if (!token || lat == null || lon == null)
-        return res.json({ ok:false, error:'Неверные данные' });
+        return res.json({ ok: false, error: 'Неверные данные' });
 
     const rec = await popGeoToken(token);
     if (!rec)
-        return res.json({ ok:false, error:'Ссылка устарела или уже использована. Запроси новую в боте.' });
+        return res.json({ ok: false, error: 'Ссылка устарела или уже использована. Запроси новую в боте.' });
 
     const inOffice  = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON) <= OFFICE_RADIUS;
     const typeLabel = rec.type === 'in' ? 'Приход' : 'Уход';
     const emoji     = rec.type === 'in' ? '✅' : '🚪';
-    const time      = new Date().toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit' });
+    const time      = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
 
     await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, inOffice);
 
@@ -426,73 +433,76 @@ app.post('/confirm-geo', async (req, res) => {
     }
 
     console.log(`✅ ${rec.user_name} — ${typeLabel} в ${time}, в офисе: ${inOffice}`);
-    res.json({ ok:true, in_office:inOffice });
+    res.json({ ok: true, in_office: inOffice });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ВЕБХУК БОТА — сюда приходят все события от Битрикс24
+//  ВЕБХУК БОТА — сюда Битрикс24 шлёт все события
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/imbot', async (req, res) => {
-    console.log('📨 /imbot BODY:', JSON.stringify(req.body));
+    // Отвечаем сразу — Битрикс24 ждёт ответ не более 5 секунд
     res.json({ result: 'ok' });
 
     try {
-        const body = req.body;
+        console.log('📨 /imbot RAW:', JSON.stringify(req.body));
 
-        const event  = body.event || body.EVENT;
-        const data   = body.data  || body.DATA;
-        const auth   = body.auth  || body.AUTH;
+        const body  = req.body;
+        const event = body.event || body.EVENT;
+        const data  = body.data  || body.DATA  || {};
+        const auth  = body.auth  || body.AUTH  || {};
 
         if (!event) {
-            console.log('⚠️ /imbot — нет поля event');
+            console.log('⚠️ /imbot — нет поля event, пропускаем');
             return;
         }
 
-        console.log('📨 event:', event);
+        // Битрикс24 может слать данные как в PARAMS, так и напрямую в data
+        const params = data.PARAMS || data.params || data;
 
-        const params       = data?.PARAMS   || data?.params   || {};
         const MESSAGE      = params.MESSAGE      || params.message      || '';
         const DIALOG_ID    = params.DIALOG_ID    || params.dialog_id    || '';
         const BOT_ID       = params.BOT_ID       || params.bot_id       || '';
         const FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || '';
         const USER_NAME    = params.USER_NAME    || params.user_name    || '';
 
-        const domain    = auth?.domain       || auth?.DOMAIN       || BITRIX_DOMAIN;
-        let authToken   = auth?.access_token || auth?.ACCESS_TOKEN || '';
-        const userName  = USER_NAME || `Пользователь ${FROM_USER_ID}`;
-        const cleanMsg  = MESSAGE.toLowerCase().trim();
-        const geoUrl    = `https://${APP_DOMAIN}/geo`;
+        const domain   = auth.domain       || auth.DOMAIN       || BITRIX_DOMAIN;
+        let authToken  = auth.access_token || auth.ACCESS_TOKEN || '';
+        const userName = USER_NAME || `Пользователь ${FROM_USER_ID}`;
+        const cleanMsg = MESSAGE.toLowerCase().trim();
+        const geoUrl   = `https://${APP_DOMAIN}/geo`;
 
-        console.log(`💬 [${domain}] ${userName}: "${MESSAGE}" (${event})`);
+        console.log(`📨 event=${event} domain=${domain} user=${userName} msg="${MESSAGE}"`);
 
-        // Обновляем токен в БД
+        // Всегда обновляем токен из входящего запроса — он самый свежий
         if (domain && authToken) {
             const existing = await getPortal(domain);
-            await savePortal(domain, authToken, existing?.refresh_token, BOT_ID || existing?.bot_id);
+            await savePortal(domain, authToken, existing?.refresh_token,
+                BOT_ID || existing?.bot_id, existing?.client_endpoint);
         }
 
-        // Берём токен из БД если не пришёл
+        // Если токен не пришёл — берём из БД
         if (!authToken) {
             const portal = await getPortal(domain);
             if (portal) {
                 authToken = portal.access_token;
                 console.log('🔑 Используем токен из БД');
             } else {
-                console.error('❌ Нет токена для домена', domain);
+                console.error('❌ Нет токена для домена:', domain);
                 return;
             }
         }
 
+        // Получаем актуальный bot_id
         const portal = await getPortal(domain);
-        const botId = BOT_ID || portal?.bot_id;
+        const botId  = BOT_ID || portal?.bot_id;
 
         if (!botId) {
-            console.error('❌ Нет bot_id для домена', domain);
+            console.error('❌ Нет bot_id для домена:', domain);
             return;
         }
 
-        // Приветствие
+        // ── Приветствие при входе в чат ──────────────────────────────────────
         if (event === 'ONIMBOTJOINCHAT') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `👋 Привет, ${userName}!\n\n` +
@@ -505,9 +515,13 @@ app.post('/imbot', async (req, res) => {
             return;
         }
 
-        if (event !== 'ONIMBOTMESSAGEADD') return;
+        if (event !== 'ONIMBOTMESSAGEADD') {
+            console.log(`ℹ️ Событие ${event} — игнорируем`);
+            return;
+        }
 
-        // пришел
+        // ── Обработка команд ─────────────────────────────────────────────────
+
         if (cleanMsg === 'пришел' || cleanMsg === 'пришёл') {
             const token = makeToken();
             await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'in');
@@ -517,7 +531,6 @@ app.post('/imbot', async (req, res) => {
                 `_Ссылка действительна 10 минут_`
             );
 
-        // ушел
         } else if (cleanMsg === 'ушел' || cleanMsg === 'ушёл') {
             const marks  = await getTodayMarks(FROM_USER_ID);
             const hasIn  = marks.some(m => m.type === 'in');
@@ -533,7 +546,6 @@ app.post('/imbot', async (req, res) => {
                     `ℹ️ Уход уже отмечен сегодня.`);
                 return;
             }
-
             const token = makeToken();
             await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'out');
             await sendMessage(domain, authToken, botId, DIALOG_ID,
@@ -542,7 +554,6 @@ app.post('/imbot', async (req, res) => {
                 `_Ссылка действительна 10 минут_`
             );
 
-        // статус
         } else if (cleanMsg === 'статус') {
             const marks = await getTodayMarks(FROM_USER_ID);
             if (marks.length === 0) {
@@ -550,8 +561,8 @@ app.post('/imbot', async (req, res) => {
                     `📊 Сегодня отметок нет.`);
             } else {
                 const lines = marks.map(m => {
-                    const t   = new Date(m.timestamp + 'Z').toLocaleTimeString('ru-RU',
-                        { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' });
+                    const t  = new Date(m.timestamp + 'Z').toLocaleTimeString('ru-RU',
+                        { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg' });
                     const tp  = m.type === 'in' ? '✅ Приход' : '🚪 Уход';
                     const loc = m.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
                     return `${tp} в ${t} — ${loc}`;
@@ -560,7 +571,6 @@ app.post('/imbot', async (req, res) => {
                     `📊 Твои отметки сегодня:\n\n${lines}`);
             }
 
-        // помощь
         } else if (cleanMsg === 'помощь') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `🤖 Бот учёта посещаемости\n\n` +
@@ -576,7 +586,7 @@ app.post('/imbot', async (req, res) => {
         }
 
     } catch (err) {
-        console.error('❌ imbot error:', err.message, err.stack);
+        console.error('❌ /imbot error:', err.message, err.stack);
     }
 });
 
@@ -587,150 +597,88 @@ app.post('/imbot', async (req, res) => {
 app.get('/', (req, res) => {
     res.send(`<h1>🤖 Бот учёта рабочего времени</h1>
     <p>Сервер работает</p>
-    <p><a href="/status">Статус</a></p>
-    <p><a href="/fix-bot">Исправить бота</a></p>`);
+    <ul>
+        <li><a href="/status">Статус</a></li>
+        <li><a href="/debug">Debug</a></li>
+        <li><a href="/reinstall-bot">Переперегистрировать бота</a></li>
+        <li><a href="/test-bot">Тест бота</a></li>
+    </ul>`);
 });
 
 app.get('/status', async (req, res) => {
-    const portalsInDb = await new Promise(r => {
+    const portals = await new Promise(r => {
         db.all(`SELECT domain, bot_id, updated_at FROM portals`, [], (e, rows) => r(rows || []));
     });
-    res.json({ 
-        ok: true, 
-        service: 'v5', 
-        portals: portalsInDb, 
+    res.json({
+        ok: true, service: 'v6',
+        portals,
         time: new Date().toISOString(),
         env: {
-            app_domain: APP_DOMAIN,
+            app_domain:      APP_DOMAIN,
             office_location: `${OFFICE_LAT}, ${OFFICE_LON}`,
-            manager_id: MANAGER_ID
+            office_radius:   OFFICE_RADIUS,
+            manager_id:      MANAGER_ID,
         }
     });
 });
 
-// ─── /bind-events — подписать события вручную ────────────────────────────────
-app.get('/bind-events', async (req, res) => {
+app.get('/debug', async (req, res) => {
     const domain = req.query.domain || BITRIX_DOMAIN;
     const portal = await getPortal(domain);
-    if (!portal) return res.json({ ok: false, error: 'Портал не найден. Переустанови приложение.' });
-
-    const results = await bindBotEvents(domain, portal.access_token);
-    res.json({ ok: true, results, handler: `https://${APP_DOMAIN}/imbot` });
+    res.json({
+        domain,
+        portal_in_db: !!portal,
+        portal_data:  portal ? {
+            domain:        portal.domain,
+            bot_id:        portal.bot_id,
+            token_preview: portal.access_token ? portal.access_token.substring(0, 12) + '...' : null,
+            updated_at:    portal.updated_at,
+        } : null,
+        app_domain: APP_DOMAIN,
+        manager_id: MANAGER_ID,
+    });
 });
 
-// ─── /reinstall-bot ───────────────────────────────────────────────────────────
+// ─── /reinstall-bot — удалить старого бота и зарегистрировать заново ─────────
+// Вызывай этот endpoint после деплоя нового кода
 app.get('/reinstall-bot', async (req, res) => {
-    const log = [];
     const domain = req.query.domain || BITRIX_DOMAIN;
     const portal = await getPortal(domain);
-    if (!portal) return res.json({ ok: false, error: 'Портал не найден в БД.' });
-
-    const token = portal.access_token;
-
-    // Пробуем удалить бота, если есть ID
-    if (portal.bot_id) {
-        const del = await callBitrix(domain, token, 'imbot.unregister', { BOT_ID: portal.bot_id });
-        log.push('🗑 Удаление: ' + JSON.stringify(del));
-        await new Promise(r => setTimeout(r, 1000));
-    }
-
-    // Регистрируем нового бота
-    const reg = await callBitrix(domain, token, 'imbot.register', {
-        CODE:                  'attendance_bot',
-        TYPE:                  'H',
-        EVENT_MESSAGE_ADD:     `https://${APP_DOMAIN}/imbot`,
-        EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
-        EVENT_BOT_DELETE:      `https://${APP_DOMAIN}/imbot`,
-        PROPERTIES: {
-            NAME: 'Учёт времени', 
-            COLOR: 'GREEN',
-            DESCRIPTION: 'Бот учёта присутствия', 
-            WORK_POSITION: 'Помощник HR',
-        }
-    });
-    
-    const newBotId = String(reg?.result || '');
-    log.push('✅ Регистрация: ' + JSON.stringify(reg));
-
-    if (newBotId) {
-        await savePortal(domain, token, portal.refresh_token, newBotId);
-        log.push('✅ bot_id: ' + newBotId);
-        
-        // Подписываемся на события
-        const bindResults = await bindBotEvents(domain, token);
-        log.push('📎 event.bind: ' + JSON.stringify(bindResults));
-    }
-
-    res.json({ ok: !!newBotId, log, new_bot_id: newBotId });
-});
-
-// ─── /fix-bot — универсальный фикс ───────────────────────────────────────────
-app.get('/fix-bot', async (req, res) => {
-    const domain = req.query.domain || BITRIX_DOMAIN;
-    const portal = await getPortal(domain);
-    if (!portal) return res.json({ ok: false, error: 'Портал не найден в БД' });
+    if (!portal) return res.json({ ok: false, error: 'Портал не найден в БД. Нажми "Переустановить" в Битрикс24.' });
 
     const log = [];
-    
+
     // Проверяем токен
     const profile = await callBitrix(domain, portal.access_token, 'profile', {});
-    log.push({ check: 'profile', result: profile?.result ? '✅' : '❌' });
+    log.push({ profile: profile?.result ? '✅ токен валидный' : '❌ токен не работает' });
 
-    // Получаем список ботов
-    const botsResp = await callBitrix(domain, portal.access_token, 'imbot.bot.list', {});
-    const botsArr  = Object.values(botsResp?.result || {});
-    log.push({ bots_found: botsArr.length });
-
-    let botId = portal.bot_id;
-    
-    // Если наш бот есть в списке, используем его ID
-    if (botsArr.length > 0) {
-        const ourBot = botsArr.find(b => b.CODE === 'attendance_bot');
-        if (ourBot) {
-            botId = String(ourBot.ID);
-            log.push({ found_our_bot: true, bot_id: botId });
-        } else if (botsArr[0]) {
-            // Если нет нашего, используем первый попавшийся (осторожно!)
-            botId = String(botsArr[0].ID);
-            log.push({ warning: 'Использую первый найденный бот', bot_id: botId });
+    if (!profile?.result) {
+        // Пробуем обновить токен
+        if (portal.refresh_token) {
+            const newToken = await doRefreshToken(domain, portal.refresh_token);
+            log.push({ refresh: newToken ? '✅ токен обновлён' : '❌ не удалось обновить' });
+            if (!newToken) return res.json({ ok: false, log, error: 'Токен просрочен. Нажми "Переустановить" в Битрикс24.' });
+        } else {
+            return res.json({ ok: false, log, error: 'Нет refresh_token. Нажми "Переустановить" в Битрикс24.' });
         }
     }
 
-    // Если бота нет, регистрируем
-    if (!botId) {
-        log.push({ action: 'Регистрируем нового бота' });
-        const reg = await callBitrix(domain, portal.access_token, 'imbot.register', {
-            CODE: 'attendance_bot',
-            TYPE: 'H',
-            EVENT_MESSAGE_ADD: `https://${APP_DOMAIN}/imbot`,
-            EVENT_WELCOME_MESSAGE: `https://${APP_DOMAIN}/imbot`,
-            PROPERTIES: {
-                NAME: 'Учёт времени',
-                COLOR: 'GREEN',
-                DESCRIPTION: 'Бот учёта присутствия',
-            }
-        });
-        botId = String(reg?.result || '');
-        log.push({ register_result: reg });
-    }
+    // Перечитываем портал после возможного обновления токена
+    const freshPortal = await getPortal(domain);
+    const token = freshPortal.access_token;
 
-    // Сохраняем bot_id
+    const botId = await registerBot(domain, token, freshPortal.bot_id || null);
     if (botId) {
-        await savePortal(domain, portal.access_token, portal.refresh_token, botId);
-        log.push({ bot_id_saved: botId });
+        await savePortal(domain, token, freshPortal.refresh_token, botId, freshPortal.client_endpoint);
+        log.push({ bot_registered: `✅ ID=${botId}` });
+    } else {
+        log.push({ bot_registered: '❌ не удалось зарегистрировать' });
     }
 
-    // Подписываемся на события
-    const bindResults = await bindBotEvents(domain, portal.access_token);
-    log.push({ bind_results: bindResults });
-
-    res.json({
-        ok: true,
-        log,
-        bot_id: botId,
-        handler: `https://${APP_DOMAIN}/imbot`,
-        message: botId ? '✅ Готово — попробуйте написать боту "помощь"' : '❌ Не удалось получить bot_id'
-    });
+    res.json({ ok: !!botId, log, bot_id: botId,
+        message: botId
+            ? `✅ Бот перерегистрирован (ID=${botId}). Найди бота в чатах и напиши "помощь".`
+            : '❌ Не удалось зарегистрировать бота.' });
 });
 
 // ─── /test-bot ────────────────────────────────────────────────────────────────
@@ -739,47 +687,24 @@ app.get('/test-bot', async (req, res) => {
     const portal = await getPortal(domain);
     if (!portal) return res.json({ ok: false, error: 'Портал не найден в БД.' });
 
-    const me = await callBitrix(domain, portal.access_token, 'profile', {});
-    const notify = await callBitrix(domain, portal.access_token, 'im.notify.system.add', {
-        USER_ID: MANAGER_ID, 
-        MESSAGE: '🔧 Тест: уведомления работают!'
+    const profile   = await callBitrix(domain, portal.access_token, 'profile', {});
+    const notify    = await callBitrix(domain, portal.access_token, 'im.notify.system.add', {
+        USER_ID: MANAGER_ID,
+        MESSAGE: '🔧 Тест уведомлений — работает!',
     });
-    
-    // Проверяем, есть ли бот
-    const botsResp = await callBitrix(domain, portal.access_token, 'imbot.bot.list', {});
-    
+    const botsResp  = await callBitrix(domain, portal.access_token, 'imbot.bot.list', {});
+
     res.json({
         portal_found:  true,
         bot_id:        portal.bot_id,
         token_updated: portal.updated_at,
-        profile_check: me?.result ? '✅ Токен валидный' : '❌ Токен недействителен',
-        profile_name:  me?.result ? `${me.result.NAME} ${me.result.LAST_NAME}` : null,
-        notify_result: notify?.result ? '✅ Уведомление отправлено' : '❌ Ошибка',
-        bots_list: botsResp?.result || 'нет данных',
+        profile_check: profile?.result ? `✅ ${profile.result.NAME} ${profile.result.LAST_NAME}` : '❌ невалидный',
+        notify_result: notify?.result  ? '✅ отправлено' : '❌ ошибка',
+        bots_in_b24:   botsResp?.result || 'нет данных',
     });
 });
 
-// ─── /debug — для отладки ─────────────────────────────────────────────────────
-app.get('/debug', async (req, res) => {
-    const domain = req.query.domain || BITRIX_DOMAIN;
-    const portal = await getPortal(domain);
-    
-    res.json({
-        domain,
-        portal_in_db: !!portal,
-        portal_data: portal ? {
-            domain: portal.domain,
-            has_bot_id: !!portal.bot_id,
-            bot_id: portal.bot_id,
-            token_preview: portal.access_token ? portal.access_token.substring(0, 10) + '...' : null,
-            updated_at: portal.updated_at
-        } : null,
-        app_domain: APP_DOMAIN,
-        manager_id: MANAGER_ID
-    });
-});
-
-// ─── Очистка старых токенов ───────────────────────────────────────────────────
+// ─── Очистка старых гео-токенов каждые 15 минут ───────────────────────────────
 cron.schedule('*/15 * * * *', () => {
     db.run(`DELETE FROM geo_tokens WHERE created_at < datetime('now', '-15 minutes')`);
     console.log('🧹 Очистка старых geo-токенов');
