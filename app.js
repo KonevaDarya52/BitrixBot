@@ -9,9 +9,9 @@ const app  = express();
 const port = process.env.PORT || 10000;
 
 const APP_DOMAIN    = process.env.APP_DOMAIN            || 'bitrixbot-bnnd.onrender.com';
-const BITRIX_DOMAIN = process.env.BITRIX_DOMAIN         || 'b24-etqwns.bitrix24.ru';
-const CLIENT_ID     = process.env.BITRIX_CLIENT_ID      || 'local.67b8e1c5a3f2e1.23456789'; // ВАШ РЕАЛЬНЫЙ CLIENT_ID
-const CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET  || 'ваш_client_secret';
+const BITRIX_DOMAIN = process.env.BITRIX_DOMAIN         || 'b24-cviqlp.bitrix24.ru';
+const CLIENT_ID     = process.env.BITRIX_CLIENT_ID      || 'local.699ef5d96dc8a3.90486015'; // ВАШ РЕАЛЬНЫЙ CLIENT_ID
+const CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET  || 'mBn7t9j3UF53bEOpp0fQ5S5favymHeguNh1d72U4E0KOaNb3kQ';
 const OFFICE_LAT    = parseFloat(process.env.OFFICE_LAT    || '57.151929');
 const OFFICE_LON    = parseFloat(process.env.OFFICE_LON    || '65.592076');
 const OFFICE_RADIUS = parseInt(process.env.OFFICE_RADIUS   || '100');
