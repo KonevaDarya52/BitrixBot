@@ -417,7 +417,7 @@ app.post('/confirm-geo', async (req, res) => {
     const inOffice  = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON) <= OFFICE_RADIUS;
     const typeLabel = rec.type === 'in' ? 'Приход' : 'Уход';
     const emoji     = rec.type === 'in' ? '✅' : '🚪';
-    const time      = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    const time      = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg' });
 
     await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, inOffice);
 
