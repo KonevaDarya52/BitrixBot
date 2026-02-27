@@ -290,6 +290,7 @@ app.post('/install', async (req, res) => {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Учёт времени</title>
+    <script src="//api.bitrix24.com/api/v1/"></script>
     <style>
         body { font-family:Arial,sans-serif; background:#f0f4ff;
                display:flex; align-items:center; justify-content:center; min-height:100vh; margin:0; }
@@ -311,6 +312,9 @@ app.post('/install', async (req, res) => {
     <div class="cmd">статус</div><br>
     <div class="cmd">помощь</div>
 </div>
+<script>
+    BX24.init(function() { BX24.installFinish(); });
+</script>
 </body>
 </html>`);
 });
