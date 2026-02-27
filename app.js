@@ -710,6 +710,16 @@ app.get('/test-bot', async (req, res) => {
     });
 });
 
+
+// ─── /check-handler ─────────────────────────────────────────────────────────────
+app.get("/check-handler", async (req, res) => {
+    const domain = req.query.domain || BITRIX_DOMAIN;
+    const portal = await getPortal(domain);
+    if (!portal) return res.json({ ok: false, error: "Портал не найден" });
+    const botsFull = await callBitrix(domain, portal.access_token, "imbot.bot.list", { SHOW_SYSTEM: "Y" });
+    const events   = await callBitrix(domain, portal.access_token, "event.get", {});
+    res.json({ bot_id: portal.bot_id, bots_full: botsFull?.result || null, registered_events: events?.result || null });
+});
 // ─── Очистка старых гео-токенов каждые 15 минут ───────────────────────────────
 cron.schedule('*/15 * * * *', () => {
     db.run(`DELETE FROM geo_tokens WHERE created_at < datetime('now', '-15 minutes')`);
