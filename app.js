@@ -798,8 +798,6 @@ app.post('/imbot', async (req, res) => {
                 text += `Нет данных за период.`;
             }
 
-
-            
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, keyboardAdmin());
 
         // ── ADMIN: КТО В ОФИСЕ ────────────────────────────────────────────────
