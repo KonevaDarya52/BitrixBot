@@ -691,3 +691,5 @@ initDB().then(() => {
     console.error('❌ Ошибка подключения к БД:', err.message);
     process.exit(1);
 });
+
+
