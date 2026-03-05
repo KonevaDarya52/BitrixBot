@@ -414,27 +414,29 @@ app.post('/confirm-geo', async (req, res) => {
     if (!rec)
         return res.json({ ok: false, error: 'Ссылка устарела или уже использована. Запроси новую в боте.' });
 
-    const inOffice  = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON) <= OFFICE_RADIUS;
-    const typeLabel = rec.type === 'in' ? 'Приход' : 'Уход';
-    const emoji     = rec.type === 'in' ? '✅' : '🚪';
-    const time      = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg' });
-
-    await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, inOffice);
-
-    await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
-        `${emoji} ${typeLabel} зафиксирован в ${time}\n` +
-        (inOffice ? '📍 В офисе' : '⚠️ Вне офиса')
-    );
+    const inOffice = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON) <= OFFICE_RADIUS;
 
     if (!inOffice) {
-        await notifyManager(rec.domain, rec.access_token,
-            `⚠️ ${rec.user_name} — ${typeLabel.toLowerCase()} вне офиса в ${time}\n` +
-            `Координаты: ${parseFloat(lat).toFixed(5)}, ${parseFloat(lon).toFixed(5)}`
+        // Отправляем сообщение об ошибке в чат
+        await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
+            `❌ Отметка ${rec.type === 'in' ? 'прихода' : 'ухода'} не выполнена.\n` +
+            `Вы находитесь вне радиуса офиса (${OFFICE_RADIUS} м). Пожалуйста, для отметки подойдите к офису.`
         );
+        return res.json({ ok: false, error: 'Вы вне офиса. Отметка не принята.' });
     }
 
-    console.log(`✅ ${rec.user_name} — ${typeLabel} в ${time}, в офисе: ${inOffice}`);
-    res.json({ ok: true, in_office: inOffice });
+    const typeLabel = rec.type === 'in' ? 'Приход' : 'Уход';
+    const emoji = rec.type === 'in' ? '✅' : '🚪';
+    const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg' });
+
+    await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, true);
+
+    await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
+        `${emoji} ${typeLabel} зафиксирован в ${time}\n📍 В офисе`
+    );
+
+    console.log(`✅ ${rec.user_name} — ${typeLabel} в ${time}, в офисе`);
+    res.json({ ok: true, in_office: true });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
