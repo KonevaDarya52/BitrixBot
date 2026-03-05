@@ -59,18 +59,6 @@ async function initDB() {
             created_at   TIMESTAMPTZ DEFAULT NOW()
         )
     `);
-    await pool.query(`
-        CREATE TABLE IF NOT EXISTS leaves (
-            id          SERIAL PRIMARY KEY,
-            user_id     TEXT NOT NULL,
-            user_name   TEXT,
-            type        TEXT NOT NULL,
-            date_from   DATE NOT NULL,
-            date_to     DATE NOT NULL,
-            comment     TEXT,
-            created_at  TIMESTAMPTZ DEFAULT NOW()
-        )
-    `);
     console.log('✅ БД инициализирована');
 }
 
@@ -100,59 +88,8 @@ function makeToken() {
     return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
-function isAdmin(userId) {
-    return String(userId) === String(MANAGER_ID);
-}
-
-// ─── Клавиатуры ──────────────────────────────────────────────────────────────
-// ВАЖНО: Битрикс принимает клавиатуру строго в таком формате
-// Каждый элемент массива = строка кнопок
-// Нажатие кнопки = бот получает MESSAGE = TEXT кнопки (не COMMAND!)
-
-function keyboardMain(userId) {
-    const rows = [
-        [
-            { TEXT: '✅ Пришёл',  BG_COLOR: '#29b36b', TEXT_COLOR: '#ffffff' },
-            { TEXT: '🚪 Ушёл',   BG_COLOR: '#e05c5c', TEXT_COLOR: '#ffffff' },
-        ],
-        [
-            { TEXT: '📊 Статус', BG_COLOR: '#5b8def', TEXT_COLOR: '#ffffff' },
-            { TEXT: '❓ Помощь', BG_COLOR: '#888888', TEXT_COLOR: '#ffffff' },
-        ],
-    ];
-    if (isAdmin(userId)) {
-        rows.push([
-            { TEXT: '⚙️ Управление', BG_COLOR: '#9b59b6', TEXT_COLOR: '#ffffff' },
-        ]);
-    }
-    return rows;
-}
-
-function keyboardGeoLink(url, type) {
-    const label = type === 'in' ? '📍 Отметить приход' : '📍 Отметить уход';
-    return [
-        [{ TEXT: label, LINK: url }],
-        [{ TEXT: '◀️ Назад в меню', BG_COLOR: '#888888', TEXT_COLOR: '#ffffff' }],
-    ];
-}
-
-function keyboardAdmin() {
-    return [
-        [
-            { TEXT: '📋 Отчёт за сегодня',  BG_COLOR: '#5b8def', TEXT_COLOR: '#ffffff' },
-            { TEXT: '📅 Отчёт за неделю',   BG_COLOR: '#5b8def', TEXT_COLOR: '#ffffff' },
-        ],
-        [
-            { TEXT: '👥 Кто в офисе',       BG_COLOR: '#29b36b', TEXT_COLOR: '#ffffff' },
-            { TEXT: '🏖 Добавить отпуск',   BG_COLOR: '#e0a020', TEXT_COLOR: '#ffffff' },
-        ],
-        [
-            { TEXT: '◀️ Назад в меню',      BG_COLOR: '#888888', TEXT_COLOR: '#ffffff' },
-        ],
-    ];
-}
-
 // ─── БД: порталы ─────────────────────────────────────────────────────────────
+
 async function savePortal(domain, accessToken, refreshToken, botId, clientEndpoint) {
     await pool.query(
         `INSERT INTO portals (domain, access_token, refresh_token, bot_id, client_endpoint, updated_at)
@@ -173,6 +110,7 @@ async function getPortal(domain) {
 }
 
 // ─── БД: посещаемость ────────────────────────────────────────────────────────
+
 async function saveAttendance(userId, userName, domain, type, lat, lon, inOffice) {
     const { rows } = await pool.query(
         `INSERT INTO attendance (user_id, user_name, domain, type, latitude, longitude, in_office)
@@ -194,6 +132,7 @@ async function getTodayMarks(userId) {
 }
 
 // ─── БД: гео-токены ──────────────────────────────────────────────────────────
+
 async function saveGeoToken(token, userId, userName, dialogId, botId, domain, accessToken, type) {
     await pool.query(
         `INSERT INTO geo_tokens (token, user_id, user_name, dialog_id, bot_id, domain, access_token, type)
@@ -215,6 +154,7 @@ async function popGeoToken(token) {
 }
 
 // ─── Bitrix24 API ─────────────────────────────────────────────────────────────
+
 async function doRefreshToken(domain, rToken) {
     try {
         const resp = await axios.get('https://oauth.bitrix24.tech/oauth/token/', {
@@ -257,22 +197,13 @@ async function callBitrix(domain, accessToken, method, params = {}) {
     }
 }
 
-// Отправка сообщения с клавиатурой
-async function sendMessage(domain, accessToken, botId, dialogId, message, keyboard = null) {
+async function sendMessage(domain, accessToken, botId, dialogId, message) {
     console.log(`📤 sendMessage → bot=${botId}, dialog=${dialogId}`);
-    const params = {
+    return callBitrix(domain, accessToken, 'imbot.message.add', {
         BOT_ID:    botId,
         DIALOG_ID: dialogId,
         MESSAGE:   message,
-    };
-    if (keyboard) {
-        params.KEYBOARD = keyboard;
-    }
-    const result = await callBitrix(domain, accessToken, 'imbot.message.add', params);
-    if (!result?.result) {
-        console.error('❌ sendMessage failed:', JSON.stringify(result));
-    }
-    return result;
+    });
 }
 
 async function notifyManager(domain, accessToken, text) {
@@ -283,6 +214,7 @@ async function notifyManager(domain, accessToken, text) {
 }
 
 // ─── Регистрация бота ─────────────────────────────────────────────────────────
+
 async function registerBot(domain, accessToken, existingBotId) {
     const handlerUrl = `https://${APP_DOMAIN}/imbot`;
 
@@ -332,18 +264,15 @@ app.post('/install', async (req, res) => {
     if (AUTH_ID && domain) {
         console.log('🔑 Токен получен для домена:', domain);
 
-        // Проверяем, зарегистрирован ли уже бот
         const botsResp = await callBitrix(domain, AUTH_ID, 'imbot.bot.list', {});
         const botsArr  = Object.values(botsResp?.result || {});
         const ourBot   = botsArr.find(b => b.CODE === 'attendance_bot');
 
         if (ourBot) {
-            // Бот уже есть — просто обновляем токен, НЕ перерегистрируем
             const existingBotId = String(ourBot.ID);
             console.log(`✅ Бот уже зарегистрирован (ID=${existingBotId}), обновляем токен`);
             await savePortal(domain, AUTH_ID, REFRESH_ID, existingBotId, SERVER_ENDPOINT);
         } else {
-            // Бота нет — регистрируем первый раз
             console.log('🤖 Бот не найден, регистрируем...');
             await savePortal(domain, AUTH_ID, REFRESH_ID, '', SERVER_ENDPOINT);
             const botId = await registerBot(domain, AUTH_ID, null);
@@ -368,13 +297,20 @@ app.post('/install', async (req, res) => {
         .card { background:white; border-radius:16px; padding:40px; text-align:center;
                 max-width:480px; width:90%; box-shadow:0 8px 24px rgba(0,0,0,0.1); }
         h1 { color:#2e7d32; margin-bottom:16px; }
+        .cmd { background:#f5f5f5; border-radius:8px; padding:12px 20px;
+               margin:8px 0; font-size:18px; font-weight:bold; display:inline-block; width:200px; }
         p { color:#555; line-height:1.6; }
     </style>
 </head>
 <body>
 <div class="card">
     <h1>🤖 Бот "Учёт времени" установлен!</h1>
-    <p>Найдите бота в списке чатов Битрикс24 и нажмите на кнопки</p>
+    <p>Найдите бота в списке чатов Битрикс24 и напишите одну из команд:</p>
+    <br>
+    <div class="cmd">пришел</div><br>
+    <div class="cmd">ушел</div><br>
+    <div class="cmd">статус</div><br>
+    <div class="cmd">помощь</div>
 </div>
 <script>
     BX24.init(function() { BX24.installFinish(); });
@@ -441,7 +377,9 @@ if (!navigator.geolocation) {
             .then(function(r){ return r.json(); })
             .then(function(d){
                 if (d.ok) {
-                    done('✅','Отметка принята!','Можно закрыть страницу.');
+                    done(d.in_office?'✅':'⚠️',
+                         d.in_office?'Отметка принята!':'Отметка принята',
+                         d.in_office?'Вы в офисе. Можно закрыть страницу.':'Вы вне офиса. Руководитель уведомлён.');
                 } else {
                     done('❌','Ошибка', d.error||'Попробуйте ещё раз');
                 }
@@ -477,45 +415,27 @@ app.post('/confirm-geo', async (req, res) => {
         return res.json({ ok: false, error: 'Ссылка устарела или уже использована. Запроси новую в боте.' });
 
     const inOffice = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON) <= OFFICE_RADIUS;
-    const typeLabel = rec.type === 'in' ? 'прихода' : 'ухода';
-    const time = new Date().toLocaleTimeString('ru-RU', {
-        hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg'
-    });
-    const kb = keyboardMain(rec.user_id);
 
+    // Если сотрудник вне офиса – отметка отклоняется, бот пишет в чат
     if (!inOffice) {
         await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
-            `❌ Отметка ${typeLabel} не принята.\n` +
-            `📍 Вы находитесь вне офиса (радиус ${OFFICE_RADIUS} м).\n` +
-            `Подойдите ближе к офису и попробуйте снова.`,
-            kb
+            `❌ Отметка ${rec.type === 'in' ? 'прихода' : 'ухода'} не выполнена.\n` +
+            `Вы находитесь вне радиуса офиса (${OFFICE_RADIUS} м). Пожалуйста, для отметки подойдите к офису.`
         );
         return res.json({ ok: false, error: 'Вы вне офиса. Отметка не принята.' });
     }
 
+    const typeLabel = rec.type === 'in' ? 'Приход' : 'Уход';
+    const emoji = rec.type === 'in' ? '✅' : '🚪';
+    const time = new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg' });
+
     await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, true);
 
-    const emoji = rec.type === 'in' ? '✅' : '🚪';
-    const label = rec.type === 'in' ? 'Приход' : 'Уход';
     await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
-        `${emoji} ${label} зафиксирован в ${time}\n📍 В офисе`,
-        kb
+        `${emoji} ${typeLabel} зафиксирован в ${time}\n📍 В офисе`
     );
 
-    if (rec.type === 'out') {
-        // Считаем сколько часов отработано
-        const marks = await getTodayMarks(rec.user_id);
-        const inMark = marks.find(m => m.type === 'in');
-        if (inMark) {
-            const diff = (Date.now() - new Date(inMark.timestamp)) / 3600000;
-            await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
-                `⏱ Рабочее время сегодня: ${diff.toFixed(1)} ч.`,
-                kb
-            );
-        }
-    }
-
-    console.log(`✅ ${rec.user_name} — ${label} в ${time}, в офисе`);
+    console.log(`✅ ${rec.user_name} — ${typeLabel} в ${time}, в офисе`);
     res.json({ ok: true, in_office: true });
 });
 
@@ -535,358 +455,124 @@ app.post('/imbot', async (req, res) => {
         const auth  = body.auth  || body.AUTH  || {};
 
         if (!event) {
-            console.log('⚠️ /imbot — нет поля event');
+            console.log('⚠️ /imbot — нет поля event, пропускаем');
             return;
         }
 
         const params = data.PARAMS || data.params || data;
 
-        // Битрикс присылает нажатие кнопки как обычное MESSAGE = текст кнопки
-        // COMMAND поле может прийти или нет — поэтому читаем оба
         const MESSAGE      = params.MESSAGE      || params.message      || '';
         const DIALOG_ID    = params.DIALOG_ID    || params.dialog_id    || '';
         const BOT_ID       = params.BOT_ID       || params.bot_id       || '';
         const FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || '';
         const USER_NAME    = params.USER_NAME    || params.user_name    || '';
 
-        // Имя берём из USER блока если есть
-        const userBlock = data.USER || data.user || {};
-        const realName  = userBlock.NAME
-            ? `${userBlock.NAME} ${userBlock.LAST_NAME || ''}`.trim()
-            : (USER_NAME || `Пользователь ${FROM_USER_ID}`);
-
         const domain   = auth.domain       || auth.DOMAIN       || BITRIX_DOMAIN;
         let authToken  = auth.access_token || auth.ACCESS_TOKEN || '';
+        const userName = USER_NAME || `Пользователь ${FROM_USER_ID}`;
+        const cleanMsg = MESSAGE.toLowerCase().trim();
+        const geoUrl   = `https://${APP_DOMAIN}/geo`;
 
-        // Нормализуем текст для сравнения
-        const msg = MESSAGE.trim().toLowerCase();
+        console.log(`📨 event=${event} domain=${domain} user=${userName} msg="${MESSAGE}"`);
 
-        console.log(`📨 event=${event} domain=${domain} user=${realName}(${FROM_USER_ID}) msg="${MESSAGE}"`);
-
-        // Обновляем/берём токен из БД
         if (domain && authToken) {
             const existing = await getPortal(domain);
             await savePortal(domain, authToken, existing?.refresh_token,
                 BOT_ID || existing?.bot_id, existing?.client_endpoint);
         }
+
         if (!authToken) {
             const portal = await getPortal(domain);
-            if (portal) authToken = portal.access_token;
-            else { console.error('❌ Нет токена для домена:', domain); return; }
+            if (portal) {
+                authToken = portal.access_token;
+            } else {
+                console.error('❌ Нет токена для домена:', domain);
+                return;
+            }
         }
 
         const portal = await getPortal(domain);
         const botId  = BOT_ID || portal?.bot_id;
-        if (!botId) { console.error('❌ Нет bot_id для домена:', domain); return; }
 
-        const geoUrl = `https://${APP_DOMAIN}/geo`;
-        const kb     = keyboardMain(FROM_USER_ID);
+        if (!botId) {
+            console.error('❌ Нет bot_id для домена:', domain);
+            return;
+        }
 
-        // ── Приветствие при первом открытии чата ─────────────────────────────
         if (event === 'ONIMBOTJOINCHAT') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `👋 Привет, ${realName}!\n\n` +
-                `Я веду учёт рабочего времени.\n` +
-                `Нажимай кнопки ниже 👇`,
-                kb
+                `👋 Привет, ${userName}!\n\n` +
+                `Команды:\n` +
+                `• "пришел" — отметить приход\n` +
+                `• "ушел" — отметить уход\n` +
+                `• "статус" — мои отметки сегодня\n` +
+                `• "помощь" — справка`
             );
             return;
         }
 
         if (event !== 'ONIMBOTMESSAGEADD') return;
 
-        // ── ПРИШЁЛ ───────────────────────────────────────────────────────────
-        if (msg === '✅ пришёл' || msg === 'пришел' || msg === 'пришёл') {
-            const marks  = await getTodayMarks(FROM_USER_ID);
-            const hasIn  = marks.some(m => m.type === 'in');
-
-            if (hasIn) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `ℹ️ Ты уже отметил приход сегодня.\nЕсли нужно — нажми "Ушёл".`,
-                    kb
-                );
-                return;
-            }
-
-            // Проверяем отпуск/больничный
-            const today = new Date().toISOString().slice(0, 10);
-            const { rows: leaveRows } = await pool.query(
-                `SELECT type FROM leaves WHERE user_id=$1 AND date_from<=$2 AND date_to>=$2`,
-                [FROM_USER_ID, today]
-            );
-            if (leaveRows.length > 0) {
-                const leaveLabels = { vacation:'отпуске', sick:'больничном', dayoff:'отгуле', trip:'командировке', remote:'удалёнке' };
-                const lbl = leaveLabels[leaveRows[0].type] || 'отпуске';
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `ℹ️ По данным системы ты сейчас в ${lbl}.\n` +
-                    `Если это ошибка — обратись к руководителю.`,
-                    kb
-                );
-                return;
-            }
-
+        if (cleanMsg === 'пришел' || cleanMsg === 'пришёл') {
             const token = makeToken();
-            await saveGeoToken(token, FROM_USER_ID, realName, DIALOG_ID, botId, domain, authToken, 'in');
+            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'in');
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `📍 Нажми кнопку ниже чтобы подтвердить приход.\n_Ссылка действует 10 минут._`,
-                keyboardGeoLink(`${geoUrl}?token=${token}`, 'in')
+                `📍 Нажми на ссылку — откроется страница геолокации.\n\n` +
+                `👉 ${geoUrl}?token=${token}\n\n` +
+                `_Ссылка действительна 10 минут_`
             );
 
-        // ── УШЁЛ ─────────────────────────────────────────────────────────────
-        } else if (msg === '🚪 ушёл' || msg === 'ушел' || msg === 'ушёл') {
+        } else if (cleanMsg === 'ушел' || cleanMsg === 'ушёл') {
             const marks  = await getTodayMarks(FROM_USER_ID);
             const hasIn  = marks.some(m => m.type === 'in');
             const hasOut = marks.some(m => m.type === 'out');
 
             if (!hasIn) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `⚠️ Сначала отметь приход — нажми "✅ Пришёл".`,
-                    kb
-                );
+                    `⚠️ Нет отметки прихода сегодня.\nСначала напиши "пришел".`);
                 return;
             }
             if (hasOut) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `ℹ️ Ты уже отметил уход сегодня.`,
-                    kb
-                );
+                    `ℹ️ Уход уже отмечен сегодня.`);
                 return;
             }
-
             const token = makeToken();
-            await saveGeoToken(token, FROM_USER_ID, realName, DIALOG_ID, botId, domain, authToken, 'out');
+            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'out');
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `📍 Нажми кнопку ниже чтобы подтвердить уход.\n_Ссылка действует 10 минут._`,
-                keyboardGeoLink(`${geoUrl}?token=${token}`, 'out')
+                `📍 Нажми на ссылку чтобы подтвердить уход:\n\n` +
+                `👉 ${geoUrl}?token=${token}\n\n` +
+                `_Ссылка действительна 10 минут_`
             );
 
-        // ── СТАТУС ────────────────────────────────────────────────────────────
-        } else if (msg === '📊 статус' || msg === 'статус') {
+        } else if (cleanMsg === 'статус') {
             const marks = await getTodayMarks(FROM_USER_ID);
             if (marks.length === 0) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `📊 Сегодня отметок нет.\nНажми "✅ Пришёл" когда придёшь в офис.`,
-                    kb
-                );
+                await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Сегодня отметок нет.`);
             } else {
                 const lines = marks.map(m => {
-                    const t  = new Date(m.timestamp).toLocaleTimeString('ru-RU',
+                    const t   = new Date(m.timestamp).toLocaleTimeString('ru-RU',
                         { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg' });
-                    const tp = m.type === 'in' ? '✅ Приход' : '🚪 Уход';
-                    return `${tp} — ${t}`;
+                    const tp  = m.type === 'in' ? '✅ Приход' : '🚪 Уход';
+                    const loc = m.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
+                    return `${tp} в ${t} — ${loc}`;
                 }).join('\n');
-
-                // Считаем время если есть оба
-                const inMark  = marks.find(m => m.type === 'in');
-                const outMark = marks.find(m => m.type === 'out');
-                let extra = '';
-                if (inMark && outMark) {
-                    const diff = (new Date(outMark.timestamp) - new Date(inMark.timestamp)) / 3600000;
-                    extra = `\n⏱ Отработано: ${diff.toFixed(1)} ч.`;
-                }
-
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `📊 Твои отметки сегодня:\n\n${lines}${extra}`,
-                    kb
-                );
+                    `📊 Твои отметки сегодня:\n\n${lines}`);
             }
 
-        // ── ПОМОЩЬ ────────────────────────────────────────────────────────────
-        } else if (msg === '❓ помощь' || msg === 'помощь' || msg === 'help') {
+        } else if (cleanMsg === 'помощь') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `🤖 *Бот учёта рабочего времени*\n\n` +
-                `✅ *Пришёл* — отметить начало рабочего дня\n` +
-                `🚪 *Ушёл* — отметить конец рабочего дня\n` +
-                `📊 *Статус* — твои отметки за сегодня\n\n` +
-                `При нажатии "Пришёл" или "Ушёл" откроется страница\n` +
-                `для подтверждения геолокации — нужно разрешить\n` +
-                `доступ к местоположению в браузере.`,
-                kb
+                `🤖 Бот учёта посещаемости\n\n` +
+                `• "пришел" — отметить приход\n` +
+                `• "ушел" — отметить уход\n` +
+                `• "статус" — отметки за сегодня\n` +
+                `• "помощь" — эта справка`
             );
 
-        // ── НАЗАД В МЕНЮ ──────────────────────────────────────────────────────
-        } else if (msg === '◀️ назад в меню' || msg === 'назад' || msg === 'меню') {
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `👇 Выбери действие:`,
-                kb
-            );
-
-        // ── ADMIN: УПРАВЛЕНИЕ ─────────────────────────────────────────────────
-        } else if (msg === '⚙️ управление' || msg === 'управление') {
-            if (!isAdmin(FROM_USER_ID)) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `🚫 Нет доступа.`, kb);
-                return;
-            }
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `⚙️ *Панель управления*\nВыбери действие:`,
-                keyboardAdmin()
-            );
-
-        // ── ADMIN: ОТЧЁТ ЗА СЕГОДНЯ ──────────────────────────────────────────
-        } else if (msg === '📋 отчёт за сегодня' || msg === 'отчёт сегодня') {
-            if (!isAdmin(FROM_USER_ID)) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb);
-                return;
-            }
-            const today = new Date().toISOString().slice(0, 10);
-            const { rows } = await pool.query(`
-                SELECT user_name, user_id,
-                    MIN(CASE WHEN type='in'  THEN timestamp END) as in_time,
-                    MAX(CASE WHEN type='out' THEN timestamp END) as out_time
-                FROM attendance
-                WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1
-                GROUP BY user_id, user_name
-                ORDER BY user_name
-            `, [today]);
-
-            const { rows: leaveRows } = await pool.query(`
-                SELECT user_name, type FROM leaves
-                WHERE date_from <= $1 AND date_to >= $1
-            `, [today]);
-
-            let text = `📋 *Отчёт за ${new Date().toLocaleDateString('ru-RU')}*\n\n`;
-
-            if (rows.length) {
-                text += `*Явились (${rows.length}):*\n`;
-                rows.forEach(r => {
-                    const inn = r.in_time
-                        ? new Date(r.in_time).toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' })
-                        : '?';
-                    const out = r.out_time
-                        ? new Date(r.out_time).toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' })
-                        : 'ещё в офисе';
-                    text += `• ${r.user_name || r.user_id}: ${inn} → ${out}\n`;
-                });
-            } else {
-                text += `Отметок нет.\n`;
-            }
-
-            if (leaveRows.length) {
-                const labels = { vacation:'отпуск', sick:'б/л', dayoff:'отгул', trip:'командировка', remote:'удалёнка' };
-                text += `\n*Отсутствуют (${leaveRows.length}):*\n`;
-                leaveRows.forEach(l => {
-                    text += `• ${l.user_name || '?'} — ${labels[l.type] || l.type}\n`;
-                });
-            }
-
-            await sendMessage(domain, authToken, botId, DIALOG_ID, text, keyboardAdmin());
-
-        // ── ADMIN: ОТЧЁТ ЗА НЕДЕЛЮ ───────────────────────────────────────────
-        } else if (msg === '📅 отчёт за неделю' || msg === 'отчёт неделя') {
-            if (!isAdmin(FROM_USER_ID)) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb);
-                return;
-            }
-            const { rows } = await pool.query(`
-                SELECT user_name, user_id,
-                    COUNT(DISTINCT (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days,
-                    MIN(timestamp) as first_in
-                FROM attendance
-                WHERE type='in'
-                  AND timestamp >= NOW() - INTERVAL '7 days'
-                GROUP BY user_id, user_name
-                ORDER BY user_name
-            `);
-
-            let text = `📅 *Отчёт за 7 дней*\n\n`;
-            if (rows.length) {
-                rows.forEach(r => {
-                    text += `• ${r.user_name || r.user_id}: явился ${r.days} из 5 дней\n`;
-                });
-            } else {
-                text += `Нет данных за период.`;
-            }
-
-            await sendMessage(domain, authToken, botId, DIALOG_ID, text, keyboardAdmin());
-
-        // ── ADMIN: КТО В ОФИСЕ ────────────────────────────────────────────────
-        } else if (msg === '👥 кто в офисе' || msg === 'кто в офисе') {
-            if (!isAdmin(FROM_USER_ID)) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb);
-                return;
-            }
-            // Кто пришёл но не ушёл сегодня
-            const { rows } = await pool.query(`
-                SELECT user_name, user_id,
-                    MIN(CASE WHEN type='in'  THEN timestamp END) as in_time,
-                    MAX(CASE WHEN type='out' THEN timestamp END) as out_time
-                FROM attendance
-                WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = (NOW() AT TIME ZONE 'Asia/Yekaterinburg')::date
-                GROUP BY user_id, user_name
-                HAVING MAX(CASE WHEN type='out' THEN 1 ELSE 0 END) = 0
-                ORDER BY user_name
-            `);
-
-            let text = `👥 *Сейчас в офисе (${rows.length} чел.):*\n\n`;
-            if (rows.length) {
-                rows.forEach(r => {
-                    const inn = r.in_time
-                        ? new Date(r.in_time).toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' })
-                        : '?';
-                    text += `• ${r.user_name || r.user_id} (с ${inn})\n`;
-                });
-            } else {
-                text += `Никого нет.`;
-            }
-
-            await sendMessage(domain, authToken, botId, DIALOG_ID, text, keyboardAdmin());
-
-        // ── ADMIN: ДОБАВИТЬ ОТПУСК ────────────────────────────────────────────
-        } else if (msg === '🏖 добавить отпуск' || msg === 'добавить отпуск') {
-            if (!isAdmin(FROM_USER_ID)) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb);
-                return;
-            }
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `🏖 *Добавление отпуска/б-л*\n\n` +
-                `Напишите в формате:\n` +
-                `[тип] [ID сотрудника] [с даты] [по дату]\n\n` +
-                `Примеры:\n` +
-                `отпуск 5 2026-03-10 2026-03-20\n` +
-                `больничный 5 2026-03-10 2026-03-15\n` +
-                `командировка 5 2026-03-10 2026-03-12\n` +
-                `удалёнка 5 2026-03-10 2026-03-14\n\n` +
-                `_Для отмены нажмите "Назад в меню"_`,
-                [[ { TEXT: '◀️ Назад в меню', BG_COLOR: '#888888', TEXT_COLOR: '#ffffff' } ]]
-            );
-
-        // ── ПАРСИНГ КОМАНДЫ ДОБАВЛЕНИЯ СТАТУСА ───────────────────────────────
-        } else if (isAdmin(FROM_USER_ID) &&
-            /^(отпуск|больничный|командировка|удалёнка|отгул)\s+\d+\s+\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}$/i.test(msg)) {
-
-            const parts = msg.split(/\s+/);
-            const typeMap = { 'отпуск':'vacation', 'больничный':'sick', 'командировка':'trip', 'удалёнка':'remote', 'отгул':'dayoff' };
-            const leaveType = typeMap[parts[0]] || 'vacation';
-            const targetId  = parts[1];
-            const dateFrom  = parts[2];
-            const dateTo    = parts[3];
-
-            // Ищем имя сотрудника
-            const { rows: nameRows } = await pool.query(
-                `SELECT user_name FROM attendance WHERE user_id=$1 LIMIT 1`, [targetId]
-            );
-            const targetName = nameRows[0]?.user_name || `ID:${targetId}`;
-
-            await pool.query(
-                `INSERT INTO leaves (user_id, user_name, type, date_from, date_to)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [targetId, targetName, leaveType, dateFrom, dateTo]
-            );
-
-            const labelMap = { vacation:'отпуск', sick:'больничный', trip:'командировку', remote:'удалёнку', dayoff:'отгул' };
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `✅ Добавлено: ${targetName} → ${labelMap[leaveType]}\n` +
-                `📅 ${dateFrom} — ${dateTo}`,
-                keyboardAdmin()
-            );
-
-        // ── ЛЮБОЕ ДРУГОЕ СООБЩЕНИЕ ────────────────────────────────────────────
         } else {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `❓ Не понял: "${MESSAGE}"\n\nВоспользуйся кнопками ниже 👇`,
-                kb
-            );
+                `❓ Не понимаю "${MESSAGE}".\nНапиши "помощь".`);
         }
 
     } catch (err) {
@@ -911,15 +597,11 @@ app.get('/', (req, res) => {
 app.get('/status', async (req, res) => {
     const { rows } = await pool.query(`SELECT domain, bot_id, updated_at FROM portals`);
     res.json({
-        ok: true, service: 'v8',
+        ok: true, service: 'v7-pg',
         portals: rows,
         time: new Date().toISOString(),
-        env: {
-            app_domain:      APP_DOMAIN,
-            office_location: `${OFFICE_LAT}, ${OFFICE_LON}`,
-            office_radius:   OFFICE_RADIUS,
-            manager_id:      MANAGER_ID,
-        }
+        env: { app_domain: APP_DOMAIN, office_location: `${OFFICE_LAT}, ${OFFICE_LON}`,
+               office_radius: OFFICE_RADIUS, manager_id: MANAGER_ID }
     });
 });
 
@@ -968,7 +650,7 @@ app.get('/reinstall-bot', async (req, res) => {
 
     res.json({ ok: !!botId, log, bot_id: botId,
         message: botId
-            ? `✅ Бот перерегистрирован (ID=${botId}).`
+            ? `✅ Бот перерегистрирован (ID=${botId}). Найди в чатах и напиши "помощь".`
             : '❌ Не удалось зарегистрировать бота.' });
 });
 
@@ -1009,3 +691,5 @@ initDB().then(() => {
     console.error('❌ Ошибка подключения к БД:', err.message);
     process.exit(1);
 });
+
+
