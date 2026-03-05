@@ -416,8 +416,8 @@ app.post('/confirm-geo', async (req, res) => {
 
     const inOffice = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON) <= OFFICE_RADIUS;
 
+    // Если сотрудник вне офиса – отметка отклоняется, бот пишет в чат
     if (!inOffice) {
-        // Отправляем сообщение об ошибке в чат
         await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
             `❌ Отметка ${rec.type === 'in' ? 'прихода' : 'ухода'} не выполнена.\n` +
             `Вы находитесь вне радиуса офиса (${OFFICE_RADIUS} м). Пожалуйста, для отметки подойдите к офису.`
