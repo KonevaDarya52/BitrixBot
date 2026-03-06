@@ -227,20 +227,14 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
 // Кнопки, которые всегда показываются под сообщением бота.
 // При нажатии кнопка отправляет текст от имени пользователя —
 // он попадает в уже существующую логику if/else без каких-либо изменений.
-const MAIN_KEYBOARD = [
-    { TYPE: 'text', TEXT: '✅ Пришёл',  COMMAND: 'пришел',  COLOR: 'green', BLOCK: 'Y' },
-    { TYPE: 'text', TEXT: '🚪 Ушёл',   COMMAND: 'ушел',    COLOR: 'red',   BLOCK: 'Y' },
-    { TYPE: 'text', TEXT: '📊 Статус', COMMAND: 'статус',  COLOR: 'blue',  BLOCK: 'Y' },
-    { TYPE: 'text', TEXT: '❓ Помощь', COMMAND: 'помощь',  COLOR: 'grey',  BLOCK: 'Y' },
-];
-
+// Кнопки KEYBOARD в Bitrix24 imbot не генерируют событий — убраны.
+// Используем быстрые команды через "/" (зарегистрированы через imbot.command.register).
 async function sendMessageWithButtons(domain, accessToken, botId, dialogId, message) {
-    console.log(`📤 sendMessageWithButtons → bot=${botId}, dialog=${dialogId}`);
+    console.log(`📤 sendMessage → bot=${botId}, dialog=${dialogId}`);
     return callBitrix(domain, accessToken, 'imbot.message.add', {
         BOT_ID:    botId,
         DIALOG_ID: dialogId,
         MESSAGE:   message,
-        KEYBOARD:  MAIN_KEYBOARD,
     });
 }
 
@@ -281,24 +275,6 @@ async function registerBot(domain, accessToken, existingBotId) {
     const botId = String(resp?.result || '');
     if (botId) {
         console.log('✅ Бот зарегистрирован, ID:', botId);
-
-        // Регистрируем быстрые команды — появляются при вводе "/" в чате
-        const commands = [
-            { CMD: 'пришел',  TITLE: 'Отметить приход',         PARAMS: '' },
-            { CMD: 'ушел',    TITLE: 'Отметить уход',           PARAMS: '' },
-            { CMD: 'статус',  TITLE: 'Мои отметки за сегодня',  PARAMS: '' },
-            { CMD: 'помощь',  TITLE: 'Справка по командам',     PARAMS: '' },
-        ];
-        for (const cmd of commands) {
-            await callBitrix(domain, accessToken, 'imbot.command.register', {
-                BOT_ID:     botId,
-                COMMAND:    cmd.CMD,
-                TITLE:      cmd.TITLE,
-                PARAMS:     cmd.PARAMS,
-                EVENT_COMMAND_ADD: handlerUrl,
-            });
-        }
-        console.log('✅ Быстрые команды зарегистрированы');
     } else {
         console.error('❌ Ошибка регистрации бота:', JSON.stringify(resp));
     }
