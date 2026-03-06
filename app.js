@@ -240,7 +240,7 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
         MESSAGE:   message,
     };
     if (keyboard) {
-        params.KEYBOARD = keyboard;
+        params.KEYBOARD = JSON.stringify(keyboard);
     }
     return callBitrix(domain, accessToken, 'imbot.message.add', params);
 }
