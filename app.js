@@ -88,6 +88,18 @@ function makeToken() {
     return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+async function getLastMark(userId) {
+    const { rows } = await pool.query(
+        `SELECT type, timestamp FROM attendance
+         WHERE user_id = $1
+           AND (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = (NOW() AT TIME ZONE 'Asia/Yekaterinburg')::date
+         ORDER BY timestamp DESC
+         LIMIT 1`,
+        [userId]
+    );
+    return rows[0] || null;
+}
+
 // ─── БД: порталы ─────────────────────────────────────────────────────────────
 
 async function savePortal(domain, accessToken, refreshToken, botId, clientEndpoint) {
@@ -514,54 +526,82 @@ app.post('/imbot', async (req, res) => {
         if (event !== 'ONIMBOTMESSAGEADD') return;
 
         if (cleanMsg === 'пришел' || cleanMsg === 'пришёл') {
-            const token = makeToken();
-            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'in');
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `📍 Нажми на ссылку — откроется страница геолокации.\n\n` +
-                `👉 ${geoUrl}?token=${token}\n\n` +
-                `_Ссылка действительна 10 минут_`
-            );
+    const lastMark = await getLastMark(FROM_USER_ID);
+    if (lastMark && lastMark.type === 'in') {
+        await sendMessage(domain, authToken, botId, DIALOG_ID,
+            '⚠️ У вас уже есть активная отметка прихода. Сначала напишите "ушел".');
+        return;
+    }
+    const token = makeToken();
+    await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'in');
+    await sendMessage(domain, authToken, botId, DIALOG_ID,
+        `📍 Нажми на ссылку — откроется страница геолокации.\n\n👉 ${geoUrl}?token=${token}\n\n_Ссылка действительна 10 минут_`
+    );
+} else if (cleanMsg === 'ушел' || cleanMsg === 'ушёл') {
+    const lastMark = await getLastMark(FROM_USER_ID);
+    if (!lastMark || lastMark.type !== 'in') {
+        await sendMessage(domain, authToken, botId, DIALOG_ID,
+            '⚠️ Нет активной отметки прихода. Сначала напишите "пришел".');
+        return;
+    }
+    const token = makeToken();
+    await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'out');
+    await sendMessage(domain, authToken, botId, DIALOG_ID,
+        `📍 Нажми на ссылку чтобы подтвердить уход:\n\n👉 ${geoUrl}?token=${token}\n\n_Ссылка действительна 10 минут_`
+    );
+} else if (cleanMsg === 'статус') {
+    const marks = await getTodayMarks(FROM_USER_ID); // уже отсортированы по возрастанию времени
+    if (marks.length === 0) {
+        await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Сегодня отметок нет.`);
+        return;
+    }
 
-        } else if (cleanMsg === 'ушел' || cleanMsg === 'ушёл') {
-            const marks  = await getTodayMarks(FROM_USER_ID);
-            const hasIn  = marks.some(m => m.type === 'in');
-            const hasOut = marks.some(m => m.type === 'out');
+    let totalSeconds = 0;
+    let lastInTime = null;
+    let lastType = null;
+    const lines = [];
 
-            if (!hasIn) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `⚠️ Нет отметки прихода сегодня.\nСначала напиши "пришел".`);
-                return;
-            }
-            if (hasOut) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `ℹ️ Уход уже отмечен сегодня.`);
-                return;
-            }
-            const token = makeToken();
-            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'out');
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `📍 Нажми на ссылку чтобы подтвердить уход:\n\n` +
-                `👉 ${geoUrl}?token=${token}\n\n` +
-                `_Ссылка действительна 10 минут_`
-            );
+    for (const mark of marks) {
+        const ts = new Date(mark.timestamp);
+        const timeStr = ts.toLocaleTimeString('ru-RU', {
+            hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg'
+        });
+        const typeEmoji = mark.type === 'in' ? '✅ Приход' : '🚪 Уход';
+        const loc = mark.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
 
-        } else if (cleanMsg === 'статус') {
-            const marks = await getTodayMarks(FROM_USER_ID);
-            if (marks.length === 0) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Сегодня отметок нет.`);
+        if (mark.type === 'in') {
+            // Начало нового интервала
+            lastInTime = ts;
+            lastType = 'in';
+            lines.push(`${typeEmoji} в ${timeStr} — ${loc}`);
+        } else { // out
+            if (lastType === 'in' && lastInTime) {
+                const diff = (ts - lastInTime) / 1000; // секунды
+                totalSeconds += diff;
+                lines.push(`${typeEmoji} в ${timeStr} — ${loc} (длительность: ${formatDuration(diff)})`);
             } else {
-                const lines = marks.map(m => {
-                    const t   = new Date(m.timestamp).toLocaleTimeString('ru-RU',
-                        { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg' });
-                    const tp  = m.type === 'in' ? '✅ Приход' : '🚪 Уход';
-                    const loc = m.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
-                    return `${tp} в ${t} — ${loc}`;
-                }).join('\n');
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `📊 Твои отметки сегодня:\n\n${lines}`);
+                // На случай непарного out (маловероятно при новых проверках)
+                lines.push(`${typeEmoji} в ${timeStr} — ${loc}`);
             }
+            lastType = 'out';
+            lastInTime = null; // интервал закрыт
+        }
+    }
 
-        } else if (cleanMsg === 'помощь') {
+    // Если остался незакрытый приход
+    if (lastType === 'in') {
+        lines.push('⏳ Есть незавершённый интервал (нет отметки ухода)');
+    }
+
+    // Формируем итоговое сообщение
+    const totalHours = Math.floor(totalSeconds / 3600);
+    const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
+    const totalStr = totalSeconds > 0 ? `\n\n⏱ **Всего в офисе:** ${totalHours} ч ${totalMinutes} мин` : '';
+
+    await sendMessage(domain, authToken, botId, DIALOG_ID,
+        `📊 Твои отметки сегодня:\n\n${lines.join('\n')}${totalStr}`
+    );
+} else if (cleanMsg === 'помощь') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `🤖 Бот учёта посещаемости\n\n` +
                 `• "пришел" — отметить приход\n` +
