@@ -224,18 +224,14 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
     });
 }
 
-// Кнопки, которые всегда показываются под сообщением бота.
-// При нажатии кнопка отправляет текст от имени пользователя —
-// он попадает в уже существующую логику if/else без каких-либо изменений.
-const MAIN_KEYBOARD = {
-    BUTTONS: [[
-        { TEXT: '✅ Пришёл',  COMMAND: 'пришел',  COLOR: 'green'  },
-        { TEXT: '🚪 Ушёл',   COMMAND: 'ушел',    COLOR: 'red'    },
-    ],[
-        { TEXT: '📊 Статус', COMMAND: 'статус',  COLOR: 'blue'   },
-        { TEXT: '❓ Помощь', COMMAND: 'помощь',  COLOR: 'grey'   },
-    ]]
-};
+// Bitrix24 принимает KEYBOARD как плоский массив объектов кнопок.
+// Обёртка { BUTTONS: [...] } не поддерживается — нужен просто массив.
+const MAIN_KEYBOARD = [
+    { TEXT: '✅ Пришёл',  COMMAND: 'пришел',  COLOR: 'green' },
+    { TEXT: '🚪 Ушёл',   COMMAND: 'ушел',    COLOR: 'red'   },
+    { TEXT: '📊 Статус', COMMAND: 'статус',  COLOR: 'blue'  },
+    { TEXT: '❓ Помощь', COMMAND: 'помощь',  COLOR: 'grey'  },
+];
 
 async function sendMessageWithButtons(domain, accessToken, botId, dialogId, message) {
     console.log(`📤 sendMessageWithButtons → bot=${botId}, dialog=${dialogId}`);
