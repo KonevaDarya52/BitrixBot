@@ -228,10 +228,10 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
 // При нажатии кнопка отправляет текст от имени пользователя —
 // он попадает в уже существующую логику if/else без каких-либо изменений.
 const MAIN_KEYBOARD = [
-    { TYPE: 'text', TEXT: '✅ Пришёл',  COMMAND: 'пришел',  COLOR: 'green' },
-    { TYPE: 'text', TEXT: '🚪 Ушёл',   COMMAND: 'ушел',    COLOR: 'red'   },
-    { TYPE: 'text', TEXT: '📊 Статус', COMMAND: 'статус',  COLOR: 'blue'  },
-    { TYPE: 'text', TEXT: '❓ Помощь', COMMAND: 'помощь',  COLOR: 'grey'  },
+    { TYPE: 'text', TEXT: '✅ Пришёл',  COMMAND: 'пришел',  COLOR: 'green', BLOCK: 'Y' },
+    { TYPE: 'text', TEXT: '🚪 Ушёл',   COMMAND: 'ушел',    COLOR: 'red',   BLOCK: 'Y' },
+    { TYPE: 'text', TEXT: '📊 Статус', COMMAND: 'статус',  COLOR: 'blue',  BLOCK: 'Y' },
+    { TYPE: 'text', TEXT: '❓ Помощь', COMMAND: 'помощь',  COLOR: 'grey',  BLOCK: 'Y' },
 ];
 
 async function sendMessageWithButtons(domain, accessToken, botId, dialogId, message) {
@@ -265,10 +265,11 @@ async function registerBot(domain, accessToken, existingBotId) {
     console.log('🤖 Регистрируем бота...');
     const resp = await callBitrix(domain, accessToken, 'imbot.register', {
         CODE:                  'attendance_bot',
-        TYPE:                  'H',
+        TYPE:                  'B',
         EVENT_MESSAGE_ADD:     handlerUrl,
         EVENT_WELCOME_MESSAGE: handlerUrl,
         EVENT_BOT_DELETE:      handlerUrl,
+        EVENT_KEYBOARD:        handlerUrl,
         PROPERTIES: {
             NAME:          'Учёт времени',
             COLOR:         'GREEN',
@@ -499,9 +500,7 @@ app.post('/imbot', async (req, res) => {
 
         const params = data.PARAMS || data.params || data;
 
-        // Bitrix24 при нажатии кнопки может слать команду в COMMAND, а не в MESSAGE
         const MESSAGE      = params.MESSAGE      || params.message      || '';
-        const COMMAND_FIELD = params.COMMAND     || params.command      || '';
         const DIALOG_ID    = params.DIALOG_ID    || params.dialog_id    || '';
         const BOT_ID       = params.BOT_ID       || params.bot_id       || '';
         const FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || '';
@@ -510,10 +509,7 @@ app.post('/imbot', async (req, res) => {
         const domain   = auth.domain       || auth.DOMAIN       || BITRIX_DOMAIN;
         let authToken  = auth.access_token || auth.ACCESS_TOKEN || '';
         const userName = USER_NAME || `Пользователь ${FROM_USER_ID}`;
-        // cleanMsg — берём MESSAGE, если пусто — смотрим COMMAND (от кнопки)
-        const cleanMsg = (MESSAGE || COMMAND_FIELD).toLowerCase().trim();
-        console.log(`🔍 MESSAGE="${MESSAGE}" COMMAND_FIELD="${COMMAND_FIELD}" cleanMsg="${cleanMsg}"`);
-        console.log(`🔍 params keys: ${Object.keys(params).join(', ')}`);
+        const cleanMsg = MESSAGE.toLowerCase().trim();
         const geoUrl   = `https://${APP_DOMAIN}/geo`;
 
         console.log(`📨 event=${event} domain=${domain} user=${userName} msg="${MESSAGE}"`);
@@ -556,7 +552,19 @@ app.post('/imbot', async (req, res) => {
             return;
         }
 
-        if (event !== 'ONIMBOTMESSAGEADD') return;
+        // Нажатие кнопки приходит как ONIMKEYBOARDACTION — извлекаем команду из него
+        if (event === 'ONIMKEYBOARDACTION') {
+            const btnCommand = (params.COMMAND || params.command || '').toLowerCase().trim();
+            console.log(`🎹 KEYBOARD ACTION: command="${btnCommand}"`);
+            if (btnCommand) {
+                // Подменяем тело запроса и пускаем через ту же логику что и текст
+                req.body.data = req.body.data || req.body.DATA || {};
+                const p = req.body.data.PARAMS || req.body.data.params || req.body.data;
+                p.MESSAGE = btnCommand;
+            } else {
+                return;
+            }
+        } else if (event !== 'ONIMBOTMESSAGEADD') return;
 
         if (cleanMsg === 'пришел' || cleanMsg === 'пришёл') {
     const lastMark = await getLastMark(FROM_USER_ID);
