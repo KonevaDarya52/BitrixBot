@@ -16,6 +16,11 @@ const OFFICE_LON    = parseFloat(process.env.OFFICE_LON    || '65.592076');
 const OFFICE_RADIUS = parseInt(process.env.OFFICE_RADIUS   || '100');
 const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
 
+// Пароль входа/выхода из режима администратора
+// Можно задать через переменную окружения ADMIN_PASSWORD в Render
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'startadmin';
+const ADMIN_STOP     = 'stopadmin';
+
 // ─── PostgreSQL ───────────────────────────────────────────────────────────────
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -36,6 +41,11 @@ async function initDB() {
         dialog_id TEXT NOT NULL, bot_id TEXT NOT NULL, domain TEXT NOT NULL,
         access_token TEXT NOT NULL, type TEXT NOT NULL,
         created_at TIMESTAMPTZ DEFAULT NOW())`);
+    // Таблица администраторов — хранит user_id всех, кто ввёл пароль
+    await pool.query(`CREATE TABLE IF NOT EXISTS admins (
+        user_id TEXT PRIMARY KEY,
+        user_name TEXT,
+        added_at TIMESTAMPTZ DEFAULT NOW())`);
     console.log('✅ БД инициализирована');
 }
 
@@ -63,90 +73,98 @@ function makeToken() {
 }
 
 function formatDuration(seconds) {
-    return `${Math.floor(seconds/3600)} ч ${Math.floor((seconds%3600)/60)} мин`;
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return `${h} ч ${m} мин`;
 }
 
-function isAdmin(userId) {
-    return String(userId) === String(MANAGER_ID);
+// ─── Админ: проверка и управление ────────────────────────────────────────────
+
+async function isAdmin(userId) {
+    if (String(userId) === String(MANAGER_ID)) return true;
+    const { rows } = await pool.query(
+        `SELECT 1 FROM admins WHERE user_id = $1`, [String(userId)]
+    );
+    return rows.length > 0;
 }
+
+async function addAdmin(userId, userName) {
+    await pool.query(
+        `INSERT INTO admins (user_id, user_name)
+         VALUES ($1, $2)
+         ON CONFLICT (user_id) DO UPDATE SET user_name = EXCLUDED.user_name, added_at = NOW()`,
+        [String(userId), userName]
+    );
+}
+
+async function removeAdmin(userId) {
+    await pool.query(`DELETE FROM admins WHERE user_id = $1`, [String(userId)]);
+}
+
+// ─── Посещаемость ────────────────────────────────────────────────────────────
 
 async function getLastMark(userId) {
     const { rows } = await pool.query(
         `SELECT type, timestamp FROM attendance
-         WHERE user_id=$1
-           AND (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date=(NOW() AT TIME ZONE 'Asia/Yekaterinburg')::date
-         ORDER BY timestamp DESC LIMIT 1`, [userId]);
+         WHERE user_id = $1
+           AND (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = (NOW() AT TIME ZONE 'Asia/Yekaterinburg')::date
+         ORDER BY timestamp DESC LIMIT 1`,
+        [userId]
+    );
     return rows[0] || null;
 }
 
+// ─── Приветственное сообщение ─────────────────────────────────────────────────
 
-// ─── Генерация приветственного сообщения ──────────────────────────────────────
-function buildGreeting(userName, firstName) {
-    const hour = new Date().toLocaleString("ru-RU", { hour: "numeric", hour12: false, timeZone: "Asia/Yekaterinburg" });
+function buildGreeting(userName, firstName, adminMode) {
+    const hour = new Date().toLocaleString('ru-RU', { hour: 'numeric', hour12: false, timeZone: 'Asia/Yekaterinburg' });
     const h = parseInt(hour);
     let timeEmoji, timeGreeting;
-    if (h >= 5 && h < 12)  { timeEmoji = "🌅"; timeGreeting = "Доброе утро"; }
-    else if (h >= 12 && h < 17) { timeEmoji = "☀️";  timeGreeting = "Добрый день"; }
-    else if (h >= 17 && h < 22) { timeEmoji = "🌆"; timeGreeting = "Добрый вечер"; }
-    else                          { timeEmoji = "🌙"; timeGreeting = "Доброй ночи"; }
-    const name = firstName || userName.split(" ")[0] || "друг";
+    if      (h >= 5  && h < 12) { timeEmoji = '🌅'; timeGreeting = 'Доброе утро'; }
+    else if (h >= 12 && h < 17) { timeEmoji = '☀️';  timeGreeting = 'Добрый день'; }
+    else if (h >= 17 && h < 22) { timeEmoji = '🌆'; timeGreeting = 'Добрый вечер'; }
+    else                         { timeEmoji = '🌙'; timeGreeting = 'Доброй ночи'; }
+
+    const name = firstName || (userName ? userName.split(' ')[0] : 'друг');
+
+    if (adminMode) {
+        return (
+            `${timeEmoji} ${timeGreeting}, ${name}! 👋\n\n` +
+            `🔐 Вы вошли как *администратор*.\n\n` +
+            `📌 Доступные функции:\n` +
+            `• 📋 Отчёт сегодня — кто пришёл и ушёл\n` +
+            `• 📅 Отчёт за неделю — сводка по дням\n` +
+            `• 📆 Отчёт за месяц — полная статистика\n` +
+            `• 👥 Кто в офисе — онлайн-список\n` +
+            `• 🚪 Выйти — вернуться в обычный режим\n\n` +
+            `⬇️ Выбирай действие:`
+        );
+    }
+
     return (
-        `${timeEmoji} ${timeGreeting}, ${name}! Рад тебя видеть 😊
-
-` +
-        `Я твой помощник по учёту рабочего времени.
-` +
-        `Не забудь отметиться — это займёт всего пару секунд! ⏱
-
-` +
-        `📌 Что я умею:
-` +
-        `• ✅ Пришёл — зафиксировать начало дня
-` +
-        `• 🚪 Ушёл — зафиксировать конец дня
-` +
-        `• 📊 Статус — посмотреть свои отметки
-` +
-        `• ❓ Помощь — справка
-
-` +
+        `${timeEmoji} ${timeGreeting}, ${name}! Рад тебя видеть 😊\n\n` +
+        `Я твой помощник по учёту рабочего времени.\n` +
+        `Не забудь отметиться — это займёт всего пару секунд! ⏱\n\n` +
+        `📌 Что я умею:\n` +
+        `• ✅ Пришёл — зафиксировать начало дня\n` +
+        `• 🚪 Ушёл — зафиксировать конец дня\n` +
+        `• 📊 Статус — посмотреть свои отметки\n` +
+        `• ❓ Помощь — справка\n\n` +
         `⬇️ Выбирай нужное действие:`
     );
 }
+
 // ═════════════════════════════════════════════════════════════════════════════
 //  КЛАВИАТУРЫ
-//
-//  ВАЖНО: кнопки с COMMAND работают ТОЛЬКО после imbot.command.register.
-//  При нажатии приходит событие ONIMCOMMANDADD, а не ONIMBOTMESSAGEADD.
-//  Поле COMMAND в ответе: data.COMMAND.COMMAND
 // ═════════════════════════════════════════════════════════════════════════════
 
-function kbMain(userId) {
-    const kb = [
+function kbMain() {
+    return [
         { TEXT:'✅ Пришёл',  COMMAND:'arrived', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' },
         { TEXT:'🚪 Ушёл',   COMMAND:'left',    COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#e05c5c', TEXT_COLOR:'#ffffff' },
         { TYPE:'NEWLINE' },
         { TEXT:'📊 Статус', COMMAND:'status',  COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
         { TEXT:'❓ Помощь', COMMAND:'help',    COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
-    ];
-    if (isAdmin(userId)) {
-        kb.push({ TYPE:'NEWLINE' });
-        kb.push({ TEXT:'⚙️ Управление', COMMAND:'admin', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#7b4fa6', TEXT_COLOR:'#ffffff' });
-    }
-    return kb;
-}
-
-function kbGeo(url, type) {
-    return [
-        {
-            TEXT: type === 'in' ? '📍 Подтвердить приход' : '📍 Подтвердить уход',
-            LINK: url,
-            DISPLAY: 'LINE',
-            BG_COLOR: '#2d8cff',
-            TEXT_COLOR: '#ffffff'
-        },
-        { TYPE: 'NEWLINE' },
-        { TEXT: '◀️ Назад', COMMAND: 'menu', COMMAND_PARAMS: '', DISPLAY: 'LINE', BG_COLOR: '#888888', TEXT_COLOR: '#ffffff' },
     ];
 }
 
@@ -155,9 +173,21 @@ function kbAdmin() {
         { TEXT:'📋 Отчёт сегодня',   COMMAND:'report_today', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
         { TEXT:'📅 Отчёт за неделю', COMMAND:'report_week',  COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
         { TYPE:'NEWLINE' },
+        { TEXT:'📆 Отчёт за месяц',  COMMAND:'report_month', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#3a7bd5', TEXT_COLOR:'#ffffff' },
         { TEXT:'👥 Кто в офисе',     COMMAND:'who_in',       COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' },
         { TYPE:'NEWLINE' },
-        { TEXT:'◀️ Назад',           COMMAND:'menu',          COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
+        { TEXT:'🚪 Выйти из админа', COMMAND:'admin_logout',  COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
+    ];
+}
+
+function kbGeo(url, type) {
+    return [
+        {
+            TEXT: type === 'in' ? '📍 Подтвердить приход' : '📍 Подтвердить уход',
+            LINK: url, DISPLAY: 'LINE', BG_COLOR: '#2d8cff', TEXT_COLOR: '#ffffff'
+        },
+        { TYPE: 'NEWLINE' },
+        { TEXT: '◀️ Назад', COMMAND: 'menu', COMMAND_PARAMS: '', DISPLAY: 'LINE', BG_COLOR: '#888888', TEXT_COLOR: '#ffffff' },
     ];
 }
 
@@ -168,17 +198,17 @@ async function savePortal(domain, accessToken, refreshToken, botId, clientEndpoi
         `INSERT INTO portals (domain,access_token,refresh_token,bot_id,client_endpoint,updated_at)
          VALUES ($1,$2,$3,$4,$5,NOW())
          ON CONFLICT (domain) DO UPDATE SET
-             access_token=EXCLUDED.access_token,
-             refresh_token=COALESCE(NULLIF($3,''),portals.refresh_token),
-             bot_id=COALESCE(NULLIF($4,''),portals.bot_id),
-             client_endpoint=COALESCE(NULLIF($5,''),portals.client_endpoint),
-             updated_at=NOW()`,
+             access_token    = EXCLUDED.access_token,
+             refresh_token   = COALESCE(NULLIF($3,''), portals.refresh_token),
+             bot_id          = COALESCE(NULLIF($4,''), portals.bot_id),
+             client_endpoint = COALESCE(NULLIF($5,''), portals.client_endpoint),
+             updated_at      = NOW()`,
         [domain, accessToken, refreshToken||'', botId||'', clientEndpoint||'']
     );
 }
 
 async function getPortal(domain) {
-    const { rows } = await pool.query(`SELECT * FROM portals WHERE domain=$1`, [domain]);
+    const { rows } = await pool.query(`SELECT * FROM portals WHERE domain = $1`, [domain]);
     return rows[0] || null;
 }
 
@@ -188,17 +218,19 @@ async function saveAttendance(userId, userName, domain, type, lat, lon, inOffice
     const { rows } = await pool.query(
         `INSERT INTO attendance (user_id,user_name,domain,type,latitude,longitude,in_office)
          VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-        [userId, userName, domain, type, lat, lon, inOffice?1:0]
+        [userId, userName, domain, type, lat, lon, inOffice ? 1 : 0]
     );
     return rows[0].id;
 }
 
 async function getTodayMarks(userId) {
     const { rows } = await pool.query(
-        `SELECT type,timestamp,in_office FROM attendance
-         WHERE user_id=$1
-           AND (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date=(NOW() AT TIME ZONE 'Asia/Yekaterinburg')::date
-         ORDER BY timestamp`, [userId]);
+        `SELECT type, timestamp, in_office FROM attendance
+         WHERE user_id = $1
+           AND (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = (NOW() AT TIME ZONE 'Asia/Yekaterinburg')::date
+         ORDER BY timestamp`,
+        [userId]
+    );
     return rows;
 }
 
@@ -209,16 +241,16 @@ async function saveGeoToken(token, userId, userName, dialogId, botId, domain, ac
         `INSERT INTO geo_tokens (token,user_id,user_name,dialog_id,bot_id,domain,access_token,type)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (token) DO UPDATE SET
-             user_id=EXCLUDED.user_id,user_name=EXCLUDED.user_name,
-             dialog_id=EXCLUDED.dialog_id,bot_id=EXCLUDED.bot_id,
-             domain=EXCLUDED.domain,access_token=EXCLUDED.access_token,
-             type=EXCLUDED.type,created_at=NOW()`,
+             user_id=EXCLUDED.user_id, user_name=EXCLUDED.user_name,
+             dialog_id=EXCLUDED.dialog_id, bot_id=EXCLUDED.bot_id,
+             domain=EXCLUDED.domain, access_token=EXCLUDED.access_token,
+             type=EXCLUDED.type, created_at=NOW()`,
         [token, userId, userName, dialogId, botId, domain, accessToken, type]
     );
 }
 
 async function popGeoToken(token) {
-    const { rows } = await pool.query(`DELETE FROM geo_tokens WHERE token=$1 RETURNING *`, [token]);
+    const { rows } = await pool.query(`DELETE FROM geo_tokens WHERE token = $1 RETURNING *`, [token]);
     return rows[0] || null;
 }
 
@@ -238,7 +270,7 @@ async function doRefreshToken(domain, rToken) {
     return null;
 }
 
-async function callBitrix(domain, accessToken, method, params={}) {
+async function callBitrix(domain, accessToken, method, params = {}) {
     try {
         const resp = await axios.post(
             `https://${domain}/rest/${method}`, params,
@@ -258,7 +290,6 @@ async function callBitrix(domain, accessToken, method, params={}) {
     }
 }
 
-// Отправить сообщение с необязательной клавиатурой
 async function sendMessage(domain, accessToken, botId, dialogId, message, keyboard) {
     console.log(`📤 sendMessage → bot=${botId}, dialog=${dialogId}`);
     const params = { BOT_ID:botId, DIALOG_ID:dialogId, MESSAGE:message };
@@ -268,13 +299,7 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
     return r;
 }
 
-async function notifyManager(domain, accessToken, text) {
-    return callBitrix(domain, accessToken, 'im.notify.system.add', { USER_ID:MANAGER_ID, MESSAGE:text });
-}
-
 // ─── Регистрация команд ───────────────────────────────────────────────────────
-// БЕЗ этого кнопки с COMMAND нажимаются но ничего не происходит (серые).
-// Вызывается при установке и при /register-commands.
 
 async function registerCommands(domain, accessToken, botId) {
     const handlerUrl = `https://${APP_DOMAIN}/imbot`;
@@ -284,19 +309,17 @@ async function registerCommands(domain, accessToken, botId) {
         { cmd:'status',       title:'Статус' },
         { cmd:'help',         title:'Помощь' },
         { cmd:'menu',         title:'Меню' },
-        { cmd:'admin',        title:'Управление' },
         { cmd:'report_today', title:'Отчёт сегодня' },
         { cmd:'report_week',  title:'Отчёт за неделю' },
+        { cmd:'report_month', title:'Отчёт за месяц' },
         { cmd:'who_in',       title:'Кто в офисе' },
+        { cmd:'admin_logout', title:'Выйти из админа' },
     ];
     for (const c of cmds) {
         const r = await callBitrix(domain, accessToken, 'imbot.command.register', {
-            BOT_ID:   botId,
-            COMMAND:  c.cmd,
-            HIDDEN:   'Y',
-            EXTRANET_SUPPORT: 'N',
+            BOT_ID: botId, COMMAND: c.cmd,
+            HIDDEN: 'Y', EXTRANET_SUPPORT: 'N',
             EVENT_COMMAND_ADD: handlerUrl,
-            // Обязательное поле LANG — без него Битрикс возвращает LANG_ERROR
             LANG: [
                 { LANGUAGE_ID: 'ru', TITLE: c.title, PARAMS: '' },
                 { LANGUAGE_ID: 'en', TITLE: c.title, PARAMS: '' },
@@ -312,7 +335,7 @@ async function registerBot(domain, accessToken, existingBotId) {
     const handlerUrl = `https://${APP_DOMAIN}/imbot`;
     if (existingBotId) {
         console.log(`🗑 Удаляем бота ID=${existingBotId}...`);
-        await callBitrix(domain, accessToken, 'imbot.unregister', { BOT_ID:existingBotId });
+        await callBitrix(domain, accessToken, 'imbot.unregister', { BOT_ID: existingBotId });
         await new Promise(r => setTimeout(r, 1500));
     }
     const resp = await callBitrix(domain, accessToken, 'imbot.register', {
@@ -352,9 +375,8 @@ app.post('/install', async (req, res) => {
         const ourBot   = botsArr.find(b => b.CODE === 'attendance_bot');
         if (ourBot) {
             const existingBotId = String(ourBot.ID);
-            console.log(`✅ Бот уже есть (ID=${existingBotId}), обновляем токен и команды`);
+            console.log(`✅ Бот уже есть (ID=${existingBotId})`);
             await savePortal(domain, AUTH_ID, REFRESH_ID, existingBotId, SERVER_ENDPOINT);
-            // Переregister команды на случай если handler URL изменился
             await registerCommands(domain, AUTH_ID, existingBotId);
         } else {
             console.log('🤖 Регистрируем бота...');
@@ -431,31 +453,33 @@ else{navigator.geolocation.getCurrentPosition(
 
 app.post('/confirm-geo', async (req, res) => {
     const { token, lat, lon } = req.body;
-    if (!token || lat==null || lon==null) return res.json({ ok:false, error:'Неверные данные' });
+    if (!token || lat == null || lon == null)
+        return res.json({ ok: false, error: 'Неверные данные' });
 
     const rec = await popGeoToken(token);
-    if (!rec) return res.json({ ok:false, error:'Ссылка устарела или уже использована. Запроси новую в боте.' });
+    if (!rec)
+        return res.json({ ok: false, error: 'Ссылка устарела или уже использована. Запроси новую в боте.' });
 
-    const inOffice = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON) <= OFFICE_RADIUS;
-    const kb = kbMain(rec.user_id);
+    const inOffice    = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON) <= OFFICE_RADIUS;
+    const userIsAdmin = await isAdmin(rec.user_id);
+    const kb          = userIsAdmin ? kbAdmin() : kbMain();
 
     if (!inOffice) {
         await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
-            `❌ Отметка ${rec.type==='in'?'прихода':'ухода'} не выполнена.\n` +
+            `❌ Отметка ${rec.type === 'in' ? 'прихода' : 'ухода'} не выполнена.\n` +
             `Вы вне радиуса офиса (${OFFICE_RADIUS} м). Подойдите ближе и попробуйте снова.`, kb);
-        return res.json({ ok:false, error:'Вы вне офиса. Отметка не принята.' });
+        return res.json({ ok: false, error: 'Вы вне офиса. Отметка не принята.' });
     }
 
-    const typeLabel = rec.type==='in' ? 'Приход' : 'Уход';
-    const emoji     = rec.type==='in' ? '✅' : '🚪';
+    const typeLabel = rec.type === 'in' ? 'Приход' : 'Уход';
+    const emoji     = rec.type === 'in' ? '✅' : '🚪';
     const time      = new Date().toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' });
 
     await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, true);
 
     let text = `${emoji} ${typeLabel} зафиксирован в ${time}\n📍 В офисе`;
     if (rec.type === 'out') {
-        const marks  = await getTodayMarks(rec.user_id);
-        // Берём последний приход (последний элемент с type='in') — не первый!
+        const marks   = await getTodayMarks(rec.user_id);
         const inMarks = marks.filter(m => m.type === 'in');
         const inMark  = inMarks[inMarks.length - 1];
         if (inMark) {
@@ -466,54 +490,44 @@ app.post('/confirm-geo', async (req, res) => {
 
     await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id, text, kb);
     console.log(`✅ ${rec.user_name} — ${typeLabel} в ${time}`);
-    res.json({ ok:true, in_office:true });
+    res.json({ ok: true, in_office: true });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  ВЕБХУК БОТА
-//
-//  ONIMBOTJOINCHAT    — первое открытие чата (показываем приветствие + кнопки)
-//  ONIMBOTMESSAGEADD  — текст от пользователя  → data.PARAMS.MESSAGE
-//  ONIMCOMMANDADD     — нажатие кнопки         → data.COMMAND.COMMAND
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/imbot', async (req, res) => {
-    res.json({ result:'ok' });
+    res.json({ result: 'ok' });
     try {
-        console.log('📨 /imbot RAW:', JSON.stringify(req.body));
-
         const body  = req.body;
         const event = body.event || body.EVENT;
         const data  = body.data  || body.DATA  || {};
         const auth  = body.auth  || body.AUTH  || {};
 
-        if (!event) { console.log('⚠️ /imbot — нет event'); return; }
+        if (!event) return;
 
-        // ONIMBOTMESSAGEADD / ONIMBOTJOINCHAT → поля в data.PARAMS
-        // ONIMCOMMANDADD                       → команда в data.COMMAND
         const params  = data.PARAMS  || data.params  || {};
         const cmdData = data.COMMAND || data.command || {};
 
         const MESSAGE      = params.MESSAGE      || params.message      || '';
-        const DIALOG_ID    = params.DIALOG_ID    || params.dialog_id    || cmdData.DIALOG_ID    || '';
-        const BOT_ID       = params.BOT_ID       || params.bot_id       || cmdData.BOT_ID       || '';
-        const FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || cmdData.USER_ID      || '';
+        const DIALOG_ID    = params.DIALOG_ID    || params.dialog_id    || cmdData.DIALOG_ID || '';
+        const BOT_ID       = params.BOT_ID       || params.bot_id       || cmdData.BOT_ID    || '';
+        const FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || cmdData.USER_ID   || '';
         const USER_NAME    = params.USER_NAME    || params.user_name    || '';
         const FIRST_NAME   = data.USER?.FIRST_NAME || data.USER?.first_name || '';
 
-        // COMMAND заполняется только при ONIMCOMMANDADD (нажатие кнопки)
         const COMMAND  = (cmdData.COMMAND || cmdData.command || '').toLowerCase().trim();
         const cleanMsg = MESSAGE.toLowerCase().trim();
-        // Битрикс шлёт нажатие кнопки как "/arrived " — убираем слеш
+        // Битрикс иногда шлёт нажатие кнопки как "/arrived " — убираем слеш
         const msgCmd   = cleanMsg.startsWith('/') ? cleanMsg.slice(1).trim() : cleanMsg;
-        // action — единый маршрутизатор: кнопка ИЛИ текст
         const action   = COMMAND || msgCmd;
 
-        const domain   = auth.domain       || auth.DOMAIN       || BITRIX_DOMAIN;
-        let authToken  = auth.access_token || auth.ACCESS_TOKEN || '';
-        const firstName = FIRST_NAME || (USER_NAME ? USER_NAME.split(" ")[0] : '');
+        const domain    = auth.domain       || auth.DOMAIN       || BITRIX_DOMAIN;
+        let authToken   = auth.access_token || auth.ACCESS_TOKEN || '';
+        const firstName = FIRST_NAME || (USER_NAME ? USER_NAME.split(' ')[0] : '');
         const userName  = USER_NAME || firstName || `Пользователь ${FROM_USER_ID}`;
-        const geoUrl   = `https://${APP_DOMAIN}/geo`;
+        const geoUrl    = `https://${APP_DOMAIN}/geo`;
 
         console.log(`📨 event=${event} user=${userName}(${FROM_USER_ID}) cmd="${COMMAND}" msg="${MESSAGE}"`);
 
@@ -525,24 +539,48 @@ app.post('/imbot', async (req, res) => {
         if (!authToken) {
             const portal = await getPortal(domain);
             if (portal) authToken = portal.access_token;
-            else { console.error('❌ Нет токена для домена:', domain); return; }
+            else { console.error('❌ Нет токена:', domain); return; }
         }
 
-        const portal = await getPortal(domain);
-        const botId  = BOT_ID || portal?.bot_id;
+        const portal      = await getPortal(domain);
+        const botId       = BOT_ID || portal?.bot_id;
         if (!botId) { console.error('❌ Нет bot_id:', domain); return; }
 
-        const kb = kbMain(FROM_USER_ID);
+        const userIsAdmin = await isAdmin(FROM_USER_ID);
+        const kb          = userIsAdmin ? kbAdmin() : kbMain();
 
-        // ── Приветствие при первом открытии чата ─────────────────────────────
-        // Здесь совмещены приветствие (как в старом файле) + кнопки (новый файл)
+        // ── Первое открытие чата ──────────────────────────────────────────────
         if (event === 'ONIMBOTJOINCHAT') {
-            await sendMessage(domain, authToken, botId, DIALOG_ID, buildGreeting(userName, firstName), kb);
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                buildGreeting(userName, firstName, userIsAdmin), kb);
             return;
         }
 
-        // Обрабатываем только нужные события
         if (event !== 'ONIMBOTMESSAGEADD' && event !== 'ONIMCOMMANDADD') return;
+
+        // ── ВХОД В РЕЖИМ АДМИНИСТРАТОРА ───────────────────────────────────────
+        // Пользователь пишет пароль (например: startadmin)
+        if (msgCmd === ADMIN_PASSWORD || cleanMsg === ADMIN_PASSWORD) {
+            await addAdmin(FROM_USER_ID, userName);
+            console.log(`🔐 ${userName} вошёл как администратор`);
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                buildGreeting(userName, firstName, true), kbAdmin());
+            return;
+        }
+
+        // ── ВЫХОД ИЗ РЕЖИМА АДМИНИСТРАТОРА ────────────────────────────────────
+        // Пишет "stopadmin" или нажимает кнопку "Выйти из админа"
+        if (action === 'admin_logout' || msgCmd === ADMIN_STOP || cleanMsg === ADMIN_STOP) {
+            if (String(FROM_USER_ID) !== String(MANAGER_ID)) {
+                await removeAdmin(FROM_USER_ID);
+            }
+            console.log(`🔓 ${userName} вышел из режима администратора`);
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `✅ Вы вышли из режима администратора.\n\n` +
+                buildGreeting(userName, firstName, false),
+                kbMain());
+            return;
+        }
 
         // ── ПРИШЁЛ ───────────────────────────────────────────────────────────
         if (action === 'arrived' || action === 'пришел' || action === 'пришёл') {
@@ -579,27 +617,29 @@ app.post('/imbot', async (req, res) => {
                 await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Сегодня отметок нет.`, kb);
                 return;
             }
-            let totalSeconds=0, lastInTime=null, lastType=null;
+            let totalSeconds = 0, lastInTime = null, lastType = null;
             const lines = [];
             for (const mark of marks) {
                 const ts   = new Date(mark.timestamp);
                 const tStr = ts.toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' });
-                const lbl  = mark.type==='in' ? '✅ Приход' : '🚪 Уход';
+                const lbl  = mark.type === 'in' ? '✅ Приход' : '🚪 Уход';
                 const loc  = mark.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
                 if (mark.type === 'in') {
-                    lastInTime=ts; lastType='in';
+                    lastInTime = ts; lastType = 'in';
                     lines.push(`${lbl} в ${tStr} — ${loc}`);
                 } else {
-                    if (lastType==='in' && lastInTime) {
-                        const diff = (ts-lastInTime)/1000;
+                    if (lastType === 'in' && lastInTime) {
+                        const diff = (ts - lastInTime) / 1000;
                         totalSeconds += diff;
                         lines.push(`${lbl} в ${tStr} — ${loc} (${formatDuration(diff)})`);
-                    } else { lines.push(`${lbl} в ${tStr} — ${loc}`); }
-                    lastType='out'; lastInTime=null;
+                    } else {
+                        lines.push(`${lbl} в ${tStr} — ${loc}`);
+                    }
+                    lastType = 'out'; lastInTime = null;
                 }
             }
-            if (lastType==='in') lines.push('⏳ Нет отметки ухода');
-            const totalStr = totalSeconds>0 ? `\n\n⏱ Всего в офисе: ${formatDuration(totalSeconds)}` : '';
+            if (lastType === 'in') lines.push('⏳ Нет отметки ухода');
+            const totalStr = totalSeconds > 0 ? `\n\n⏱ Всего в офисе: ${formatDuration(totalSeconds)}` : '';
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `📊 Твои отметки сегодня:\n\n${lines.join('\n')}${totalStr}`, kb);
 
@@ -610,24 +650,16 @@ app.post('/imbot', async (req, res) => {
                 `✅ Пришёл — отметить начало дня\n` +
                 `🚪 Ушёл — отметить конец дня\n` +
                 `📊 Статус — отметки за сегодня\n\n` +
-                `При нажатии кнопки откроется страница\nдля подтверждения геолокации.`, kb);
+                `При нажатии кнопки откроется страница для подтверждения геолокации.`, kb);
 
-        // ── МЕНЮ / НАЗАД ──────────────────────────────────────────────────────
+        // ── МЕНЮ ─────────────────────────────────────────────────────────────
         } else if (action === 'menu' || action === 'назад' || action === 'меню') {
             await sendMessage(domain, authToken, botId, DIALOG_ID, `👇 Выбери действие:`, kb);
 
-        // ── ADMIN ─────────────────────────────────────────────────────────────
-        } else if (action === 'admin' || action === 'управление') {
-            if (!isAdmin(FROM_USER_ID)) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb);
-                return;
-            }
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `⚙️ Панель управления\nВыбери действие:`, kbAdmin());
-
         // ── ОТЧЁТ СЕГОДНЯ ─────────────────────────────────────────────────────
         } else if (action === 'report_today') {
-            if (!isAdmin(FROM_USER_ID)) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-            const today = new Date().toLocaleDateString('sv-SE', { timeZone:'Asia/Yekaterinburg' });
+            if (!userIsAdmin) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Yekaterinburg' });
             const { rows } = await pool.query(`
                 SELECT user_name, user_id,
                     MIN(CASE WHEN type='in'  THEN timestamp END) as in_time,
@@ -637,31 +669,44 @@ app.post('/imbot', async (req, res) => {
                 GROUP BY user_id, user_name ORDER BY user_name`, [today]);
             let text = `📋 Отчёт за ${new Date().toLocaleDateString('ru-RU')}\n\n`;
             if (rows.length) {
-                text += `Явились (${rows.length}):\n`;
+                text += `Явились (${rows.length} чел.):\n`;
                 rows.forEach(r => {
-                    const i = r.in_time  ? new Date(r.in_time).toLocaleTimeString('ru-RU',  {hour:'2-digit',minute:'2-digit',timeZone:'Asia/Yekaterinburg'}) : '?';
-                    const o = r.out_time ? new Date(r.out_time).toLocaleTimeString('ru-RU', {hour:'2-digit',minute:'2-digit',timeZone:'Asia/Yekaterinburg'}) : 'ещё в офисе';
-                    text += `• ${r.user_name||r.user_id}: ${i} → ${o}\n`;
+                    const i = r.in_time  ? new Date(r.in_time).toLocaleTimeString('ru-RU',  { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' }) : '?';
+                    const o = r.out_time ? new Date(r.out_time).toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' }) : 'ещё в офисе';
+                    text += `• ${r.user_name || r.user_id}: ${i} → ${o}\n`;
                 });
-            } else text += `Отметок нет.`;
+            } else { text += `Отметок нет.`; }
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
         // ── ОТЧЁТ ЗА НЕДЕЛЮ ───────────────────────────────────────────────────
         } else if (action === 'report_week') {
-            if (!isAdmin(FROM_USER_ID)) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            if (!userIsAdmin) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const { rows } = await pool.query(`
                 SELECT user_name, user_id,
                     COUNT(DISTINCT (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
-                FROM attendance WHERE type='in' AND timestamp >= NOW()-INTERVAL '7 days'
+                FROM attendance WHERE type='in' AND timestamp >= NOW() - INTERVAL '7 days'
                 GROUP BY user_id, user_name ORDER BY user_name`);
             let text = `📅 Отчёт за 7 дней\n\n`;
-            if (rows.length) rows.forEach(r => { text += `• ${r.user_name||r.user_id}: ${r.days} дн.\n`; });
+            if (rows.length) rows.forEach(r => { text += `• ${r.user_name || r.user_id}: ${r.days} дн.\n`; });
+            else text += `Нет данных.`;
+            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
+
+        // ── ОТЧЁТ ЗА МЕСЯЦ ────────────────────────────────────────────────────
+        } else if (action === 'report_month') {
+            if (!userIsAdmin) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const { rows } = await pool.query(`
+                SELECT user_name, user_id,
+                    COUNT(DISTINCT (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
+                FROM attendance WHERE type='in' AND timestamp >= NOW() - INTERVAL '30 days'
+                GROUP BY user_id, user_name ORDER BY days DESC`);
+            let text = `📆 Отчёт за 30 дней\n\n`;
+            if (rows.length) rows.forEach(r => { text += `• ${r.user_name || r.user_id}: ${r.days} раб. дн.\n`; });
             else text += `Нет данных.`;
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
         // ── КТО В ОФИСЕ ───────────────────────────────────────────────────────
         } else if (action === 'who_in') {
-            if (!isAdmin(FROM_USER_ID)) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            if (!userIsAdmin) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const { rows } = await pool.query(`
                 SELECT user_name, user_id,
                     MIN(CASE WHEN type='in' THEN timestamp END) as in_time
@@ -671,21 +716,25 @@ app.post('/imbot', async (req, res) => {
                 HAVING MAX(CASE WHEN type='out' THEN 1 ELSE 0 END) = 0
                 ORDER BY user_name`);
             let text = `👥 Сейчас в офисе (${rows.length} чел.):\n\n`;
-            if (rows.length) rows.forEach(r => {
-                const t = r.in_time ? new Date(r.in_time).toLocaleTimeString('ru-RU',{hour:'2-digit',minute:'2-digit',timeZone:'Asia/Yekaterinburg'}) : '?';
-                text += `• ${r.user_name||r.user_id} (с ${t})\n`;
-            }); else text += `Никого нет.`;
+            if (rows.length) {
+                rows.forEach(r => {
+                    const t = r.in_time ? new Date(r.in_time).toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' }) : '?';
+                    text += `• ${r.user_name || r.user_id} (с ${t})\n`;
+                });
+            } else { text += `Никого нет.`; }
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
-        // ── НЕИЗВЕСТНАЯ КОМАНДА / ПРИВЕТСТВИЕ ───────────────────────────────
+        // ── НЕИЗВЕСТНОЕ / ПРИВЕТСТВИЕ ─────────────────────────────────────────
         } else {
-            const greetings = ["привет", "hello", "hi", "хай", "здравствуй", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "добрый", "ку", "хэй", "салют", "даров", "дарова"];
+            const greetings = ['привет', 'hello', 'hi', 'хай', 'здравствуй', 'здравствуйте',
+                               'добрый день', 'добрый вечер', 'доброе утро', 'добрый',
+                               'ку', 'хэй', 'салют', 'даров', 'дарова'];
             if (greetings.some(g => msgCmd.includes(g) || cleanMsg.includes(g))) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID, buildGreeting(userName, firstName), kb);
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    buildGreeting(userName, firstName, userIsAdmin), kb);
             } else {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `❓ Не понимаю "${MESSAGE||COMMAND}".
-Воспользуйся кнопками 👇`, kb);
+                    `❓ Не понимаю "${MESSAGE || COMMAND}".\nВоспользуйся кнопками 👇`, kb);
             }
         }
 
@@ -701,45 +750,43 @@ app.post('/imbot', async (req, res) => {
 app.get('/', (req, res) => {
     res.send(`<h1>🤖 Бот учёта рабочего времени</h1><ul>
     <li><a href="/status">Статус</a></li>
-    <li><a href="/debug">Debug</a></li>
-    <li><a href="/register-commands">Зарегистрировать команды (исправить кнопки)</a></li>
+    <li><a href="/debug">Debug (список админов)</a></li>
+    <li><a href="/register-commands">Зарегистрировать команды</a></li>
     <li><a href="/reinstall-bot">Перерегистрировать бота</a></li>
     <li><a href="/test-bot">Тест бота</a></li></ul>`);
 });
 
 app.get('/status', async (req, res) => {
     const { rows } = await pool.query(`SELECT domain, bot_id, updated_at FROM portals`);
-    res.json({ ok:true, service:'v9-fixed', portals:rows, time:new Date().toISOString(),
+    res.json({ ok:true, service:'v10-admin', portals:rows, time:new Date().toISOString(),
         env:{ app_domain:APP_DOMAIN, office:`${OFFICE_LAT},${OFFICE_LON}`, radius:OFFICE_RADIUS, manager:MANAGER_ID } });
 });
 
 app.get('/debug', async (req, res) => {
     const domain = req.query.domain || BITRIX_DOMAIN;
     const portal = await getPortal(domain);
-    res.json({ domain, portal_in_db:!!portal,
-        data: portal ? { bot_id:portal.bot_id, token:portal.access_token?.slice(0,12)+'...', updated:portal.updated_at } : null });
+    const { rows: admins } = await pool.query(`SELECT user_id, user_name, added_at FROM admins`);
+    res.json({ domain, portal_in_db: !!portal,
+        data: portal ? { bot_id:portal.bot_id, token:portal.access_token?.slice(0,12)+'...', updated:portal.updated_at } : null,
+        admins });
 });
 
-// Зарегистрировать команды без перезапуска бота
-// Открой в браузере: https://ВАШ_ДОМЕН/register-commands
 app.get('/register-commands', async (req, res) => {
     const domain = req.query.domain || BITRIX_DOMAIN;
     const portal = await getPortal(domain);
-    if (!portal)        return res.json({ ok:false, error:'Портал не найден. Нажми "Переустановить" в Битрикс24.' });
-    if (!portal.bot_id) return res.json({ ok:false, error:'bot_id не найден в БД.' });
+    if (!portal)        return res.json({ ok:false, error:'Портал не найден.' });
+    if (!portal.bot_id) return res.json({ ok:false, error:'bot_id не найден.' });
     await registerCommands(domain, portal.access_token, portal.bot_id);
-    res.json({ ok:true, message:`✅ Команды зарегистрированы для бота ID=${portal.bot_id}. Кнопки теперь должны работать.` });
+    res.json({ ok:true, message:`✅ Команды зарегистрированы для бота ID=${portal.bot_id}.` });
 });
 
 app.get('/reinstall-bot', async (req, res) => {
     const domain = req.query.domain || BITRIX_DOMAIN;
     const portal = await getPortal(domain);
-    if (!portal) return res.json({ ok:false, error:'Портал не найден. Нажми "Переустановить" в Битрикс24.' });
-
+    if (!portal) return res.json({ ok:false, error:'Портал не найден.' });
     const log = [];
     const profile = await callBitrix(domain, portal.access_token, 'profile', {});
     log.push({ profile: profile?.result ? '✅ токен валидный' : '❌ невалидный' });
-
     if (!profile?.result) {
         if (portal.refresh_token) {
             const newToken = await doRefreshToken(domain, portal.refresh_token);
@@ -749,12 +796,11 @@ app.get('/reinstall-bot', async (req, res) => {
             return res.json({ ok:false, log, error:'Нет refresh_token.' });
         }
     }
-
     const fresh = await getPortal(domain);
-    const botId = await registerBot(domain, fresh.access_token, fresh.bot_id||null);
+    const botId = await registerBot(domain, fresh.access_token, fresh.bot_id || null);
     if (botId) {
         await savePortal(domain, fresh.access_token, fresh.refresh_token, botId, fresh.client_endpoint);
-        log.push({ bot:`✅ ID=${botId}` });
+        log.push({ bot: `✅ ID=${botId}` });
     }
     res.json({ ok:!!botId, log, bot_id:botId });
 });
@@ -763,19 +809,14 @@ app.get('/test-bot', async (req, res) => {
     const domain = req.query.domain || BITRIX_DOMAIN;
     const portal = await getPortal(domain);
     if (!portal) return res.json({ ok:false, error:'Портал не найден.' });
-
     const profile = await callBitrix(domain, portal.access_token, 'profile', {});
-    const notify  = await callBitrix(domain, portal.access_token, 'im.notify.system.add',
-        { USER_ID:MANAGER_ID, MESSAGE:'🔧 Тест уведомлений — работает!' });
-    const bots = await callBitrix(domain, portal.access_token, 'imbot.bot.list', {});
-    const cmds = await callBitrix(domain, portal.access_token, 'imbot.command.list', { BOT_ID:portal.bot_id });
-
+    const bots    = await callBitrix(domain, portal.access_token, 'imbot.bot.list', {});
+    const { rows: admins } = await pool.query(`SELECT user_id, user_name FROM admins`);
     res.json({
         bot_id:        portal.bot_id,
         profile_check: profile?.result ? `✅ ${profile.result.NAME} ${profile.result.LAST_NAME}` : '❌',
-        notify_result: notify?.result  ? '✅' : '❌',
-        bots_in_b24:   bots?.result  || null,
-        commands_list: cmds?.result  || null,
+        bots_in_b24:   bots?.result || null,
+        admins_in_db:  admins,
     });
 });
 
@@ -791,6 +832,7 @@ initDB().then(() => {
         console.log(`🚀 Сервер: https://${APP_DOMAIN}`);
         console.log(`📍 Офис: ${OFFICE_LAT}, ${OFFICE_LON} (${OFFICE_RADIUS}м)`);
         console.log(`🆔 Менеджер: ${MANAGER_ID}`);
+        console.log(`🔐 Пароль входа в админку: ${ADMIN_PASSWORD}`);
         console.log('=== ✅ READY ===');
     });
 }).catch(err => {
