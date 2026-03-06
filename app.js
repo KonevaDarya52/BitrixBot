@@ -455,7 +455,9 @@ app.post('/confirm-geo', async (req, res) => {
     let text = `${emoji} ${typeLabel} зафиксирован в ${time}\n📍 В офисе`;
     if (rec.type === 'out') {
         const marks  = await getTodayMarks(rec.user_id);
-        const inMark = marks.find(m => m.type === 'in');
+        // Берём последний приход (последний элемент с type='in') — не первый!
+        const inMarks = marks.filter(m => m.type === 'in');
+        const inMark  = inMarks[inMarks.length - 1];
         if (inMark) {
             const diff = (Date.now() - new Date(inMark.timestamp)) / 1000;
             text += `\n⏱ Отработано: ${formatDuration(diff)}`;
