@@ -111,11 +111,6 @@ function getMainKeyboard(botId) {
     };
 }
 
-await sendMessage(domain, authToken, botId, DIALOG_ID,
-    `❓ Не понимаю "${MESSAGE}".\nНапиши "помощь".`,
-    getMainKeyboard(botId)
-);
-
 async function getLastMark(userId) {
     const { rows } = await pool.query(
         `SELECT type, timestamp FROM attendance
