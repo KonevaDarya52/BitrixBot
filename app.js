@@ -97,16 +97,9 @@ function formatDuration(seconds) {
 function getMainKeyboard(botId) {
     return {
         BUTTONS: [
-            [
-                { TEXT: "✅ Пришел",   COMMAND: "пришел", COMMAND_PARAMS: "" }
-            ],
-            [
-                { TEXT: "🚪 Ушел",     COMMAND: "ушел",   COMMAND_PARAMS: "" }
-            ],
-            [
-                { TEXT: "📊 Статус",   COMMAND: "статус", COMMAND_PARAMS: "" },
-                { TEXT: "❓ Помощь",   COMMAND: "помощь", COMMAND_PARAMS: "" }
-            ]
+            [ { TEXT: "✅ Пришел", COMMAND: "пришел" } ],
+            [ { TEXT: "🚪 Ушел", COMMAND: "ушел" } ],
+            [ { TEXT: "📊 Статус", COMMAND: "статус" }, { TEXT: "❓ Помощь", COMMAND: "помощь" } ]
         ]
     };
 }
@@ -240,8 +233,10 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
         MESSAGE:   message,
     };
     if (keyboard) {
-        params.KEYBOARD = JSON.stringify(keyboard);
+        params.KEYBOARD = keyboard;
+        console.log('KEYBOARD object:', JSON.stringify(keyboard));
     }
+    console.log('sendMessage params:', JSON.stringify(params));
     return callBitrix(domain, accessToken, 'imbot.message.add', params);
 }
 
