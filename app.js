@@ -94,6 +94,28 @@ function formatDuration(seconds) {
     return `${h} ч ${m} мин`;
 }
 
+function getMainKeyboard(botId) {
+    return {
+        BUTTONS: [
+            [
+                { TEXT: "✅ Пришел",   COMMAND: "пришел", COMMAND_PARAMS: "" }
+            ],
+            [
+                { TEXT: "🚪 Ушел",     COMMAND: "ушел",   COMMAND_PARAMS: "" }
+            ],
+            [
+                { TEXT: "📊 Статус",   COMMAND: "статус", COMMAND_PARAMS: "" },
+                { TEXT: "❓ Помощь",   COMMAND: "помощь", COMMAND_PARAMS: "" }
+            ]
+        ]
+    };
+}
+
+await sendMessage(domain, authToken, botId, DIALOG_ID,
+    `❓ Не понимаю "${MESSAGE}".\nНапиши "помощь".`,
+    getMainKeyboard(botId)
+);
+
 async function getLastMark(userId) {
     const { rows } = await pool.query(
         `SELECT type, timestamp FROM attendance
@@ -215,13 +237,17 @@ async function callBitrix(domain, accessToken, method, params = {}) {
     }
 }
 
-async function sendMessage(domain, accessToken, botId, dialogId, message) {
+async function sendMessage(domain, accessToken, botId, dialogId, message, keyboard = null) {
     console.log(`📤 sendMessage → bot=${botId}, dialog=${dialogId}`);
-    return callBitrix(domain, accessToken, 'imbot.message.add', {
+    const params = {
         BOT_ID:    botId,
         DIALOG_ID: dialogId,
         MESSAGE:   message,
-    });
+    };
+    if (keyboard) {
+        params.KEYBOARD = keyboard;
+    }
+    return callBitrix(domain, accessToken, 'imbot.message.add', params);
 }
 
 async function notifyManager(domain, accessToken, text) {
@@ -524,7 +550,8 @@ app.post('/imbot', async (req, res) => {
                 `• "пришел" — отметить приход\n` +
                 `• "ушел" — отметить уход\n` +
                 `• "статус" — мои отметки сегодня\n` +
-                `• "помощь" — справка`
+                `• "помощь" — справка`,
+                getMainKeyboard(botId) 
             );
             return;
         }
@@ -609,7 +636,8 @@ app.post('/imbot', async (req, res) => {
                 `• "пришел" — отметить приход\n` +
                 `• "ушел" — отметить уход\n` +
                 `• "статус" — отметки за сегодня\n` +
-                `• "помощь" — эта справка`
+                `• "помощь" — эта справка`,
+                getMainKeyboard(botId)
             );
 
         } else {
