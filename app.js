@@ -224,13 +224,13 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
     });
 }
 
-// Bitrix24 принимает KEYBOARD как плоский массив объектов кнопок.
-// Обёртка { BUTTONS: [...] } не поддерживается — нужен просто массив.
+// TYPE: 'text' — при нажатии кнопка отправляет COMMAND как сообщение от пользователя.
+// Без TYPE кнопка визуально нажимается, но команду в чат не отправляет.
 const MAIN_KEYBOARD = [
-    { TEXT: '✅ Пришёл',  COMMAND: 'пришел',  COLOR: 'green' },
-    { TEXT: '🚪 Ушёл',   COMMAND: 'ушел',    COLOR: 'red'   },
-    { TEXT: '📊 Статус', COMMAND: 'статус',  COLOR: 'blue'  },
-    { TEXT: '❓ Помощь', COMMAND: 'помощь',  COLOR: 'grey'  },
+    { TYPE: 'text', TEXT: '✅ Пришёл',  COMMAND: 'пришел',  COLOR: 'green' },
+    { TYPE: 'text', TEXT: '🚪 Ушёл',   COMMAND: 'ушел',    COLOR: 'red'   },
+    { TYPE: 'text', TEXT: '📊 Статус', COMMAND: 'статус',  COLOR: 'blue'  },
+    { TYPE: 'text', TEXT: '❓ Помощь', COMMAND: 'помощь',  COLOR: 'grey'  },
 ];
 
 async function sendMessageWithButtons(domain, accessToken, botId, dialogId, message) {
