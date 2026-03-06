@@ -467,8 +467,10 @@ app.post('/imbot', async (req, res) => {
         // COMMAND заполняется только при ONIMCOMMANDADD (нажатие кнопки)
         const COMMAND  = (cmdData.COMMAND || cmdData.command || '').toLowerCase().trim();
         const cleanMsg = MESSAGE.toLowerCase().trim();
+        // Битрикс шлёт нажатие кнопки как "/arrived " — убираем слеш
+        const msgCmd   = cleanMsg.startsWith('/') ? cleanMsg.slice(1).trim() : cleanMsg;
         // action — единый маршрутизатор: кнопка ИЛИ текст
-        const action   = COMMAND || cleanMsg;
+        const action   = COMMAND || msgCmd;
 
         const domain   = auth.domain       || auth.DOMAIN       || BITRIX_DOMAIN;
         let authToken  = auth.access_token || auth.ACCESS_TOKEN || '';
