@@ -259,10 +259,14 @@ async function registerCommands(domain, accessToken, botId) {
         const r = await callBitrix(domain, accessToken, 'imbot.command.register', {
             BOT_ID:   botId,
             COMMAND:  c.cmd,
-            TITLE:    c.title,
-            HIDDEN:   'Y',               // не показывать в подсказках /команды
+            HIDDEN:   'Y',
             EXTRANET_SUPPORT: 'N',
             EVENT_COMMAND_ADD: handlerUrl,
+            // Обязательное поле LANG — без него Битрикс возвращает LANG_ERROR
+            LANG: [
+                { LANGUAGE_ID: 'ru', TITLE: c.title, PARAMS: '' },
+                { LANGUAGE_ID: 'en', TITLE: c.title, PARAMS: '' },
+            ],
         });
         console.log(`📎 command.register [${c.cmd}]:`, r?.result ? '✅' : ('❌ ' + JSON.stringify(r)));
     }
