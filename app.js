@@ -81,7 +81,7 @@ async function getLastMark(userId) {
 
 
 // ─── Генерация приветственного сообщения ──────────────────────────────────────
-function buildGreeting(userName) {
+function buildGreeting(userName, firstName) {
     const hour = new Date().toLocaleString("ru-RU", { hour: "numeric", hour12: false, timeZone: "Asia/Yekaterinburg" });
     const h = parseInt(hour);
     let timeEmoji, timeGreeting;
@@ -89,9 +89,9 @@ function buildGreeting(userName) {
     else if (h >= 12 && h < 17) { timeEmoji = "☀️";  timeGreeting = "Добрый день"; }
     else if (h >= 17 && h < 22) { timeEmoji = "🌆"; timeGreeting = "Добрый вечер"; }
     else                          { timeEmoji = "🌙"; timeGreeting = "Доброй ночи"; }
-    const firstName = userName.split(" ")[0];
+    const name = firstName || userName.split(" ")[0] || "друг";
     return (
-        `${timeEmoji} ${timeGreeting}, ${firstName}! Рад тебя видеть 😊
+        `${timeEmoji} ${timeGreeting}, ${name}! Рад тебя видеть 😊
 
 ` +
         `Я твой помощник по учёту рабочего времени.
@@ -497,6 +497,7 @@ app.post('/imbot', async (req, res) => {
         const BOT_ID       = params.BOT_ID       || params.bot_id       || cmdData.BOT_ID       || '';
         const FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || cmdData.USER_ID      || '';
         const USER_NAME    = params.USER_NAME    || params.user_name    || '';
+        const FIRST_NAME   = data.USER?.FIRST_NAME || data.USER?.first_name || '';
 
         // COMMAND заполняется только при ONIMCOMMANDADD (нажатие кнопки)
         const COMMAND  = (cmdData.COMMAND || cmdData.command || '').toLowerCase().trim();
@@ -508,7 +509,8 @@ app.post('/imbot', async (req, res) => {
 
         const domain   = auth.domain       || auth.DOMAIN       || BITRIX_DOMAIN;
         let authToken  = auth.access_token || auth.ACCESS_TOKEN || '';
-        const userName = USER_NAME || `Пользователь ${FROM_USER_ID}`;
+        const firstName = FIRST_NAME || (USER_NAME ? USER_NAME.split(" ")[0] : '');
+        const userName  = USER_NAME || firstName || `Пользователь ${FROM_USER_ID}`;
         const geoUrl   = `https://${APP_DOMAIN}/geo`;
 
         console.log(`📨 event=${event} user=${userName}(${FROM_USER_ID}) cmd="${COMMAND}" msg="${MESSAGE}"`);
@@ -533,7 +535,7 @@ app.post('/imbot', async (req, res) => {
         // ── Приветствие при первом открытии чата ─────────────────────────────
         // Здесь совмещены приветствие (как в старом файле) + кнопки (новый файл)
         if (event === 'ONIMBOTJOINCHAT') {
-            await sendMessage(domain, authToken, botId, DIALOG_ID, buildGreeting(userName), kb);
+            await sendMessage(domain, authToken, botId, DIALOG_ID, buildGreeting(userName, firstName), kb);
             return;
         }
 
@@ -677,7 +679,7 @@ app.post('/imbot', async (req, res) => {
         } else {
             const greetings = ["привет", "hello", "hi", "хай", "здравствуй", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "добрый", "ку", "хэй", "салют", "даров", "дарова"];
             if (greetings.some(g => msgCmd.includes(g) || cleanMsg.includes(g))) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID, buildGreeting(userName), kb);
+                await sendMessage(domain, authToken, botId, DIALOG_ID, buildGreeting(userName, firstName), kb);
             } else {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
                     `❓ Не понимаю "${MESSAGE||COMMAND}".
