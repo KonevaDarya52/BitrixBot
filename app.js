@@ -224,26 +224,19 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
     });
 }
 
-// Кнопки через ATTACH — при нажатии Bitrix24 шлёт ONIMBOTMESSAGEADD с текстом COMMAND
-function makeKeyboard() {
-    return [{
-        TYPE: 'BUTTONS',
-        BLOCKS: [
-            { TYPE: 'BUTTON', COLOR: '29B239', TEXT: '✅ Пришёл',  COMMAND: 'пришел'  },
-            { TYPE: 'BUTTON', COLOR: 'FF5752', TEXT: '🚪 Ушёл',   COMMAND: 'ушел'    },
-            { TYPE: 'BUTTON', COLOR: '2FC6F6', TEXT: '📊 Статус', COMMAND: 'статус'  },
-            { TYPE: 'BUTTON', COLOR: '9DA8B4', TEXT: '❓ Помощь', COMMAND: 'помощь'  },
-        ]
-    }];
-}
-
+// Правильный формат ATTACH для кнопок в Bitrix24 imbot
 async function sendMessageWithButtons(domain, accessToken, botId, dialogId, message) {
     console.log(`📤 sendMessageWithButtons → bot=${botId}, dialog=${dialogId}`);
     return callBitrix(domain, accessToken, 'imbot.message.add', {
         BOT_ID:    botId,
         DIALOG_ID: dialogId,
         MESSAGE:   message,
-        ATTACH:    makeKeyboard(),
+        KEYBOARD: [
+            { TEXT: '✅ Пришёл',  COMMAND: 'пришел',  COLOR: 'green' },
+            { TEXT: '🚪 Ушёл',   COMMAND: 'ушел',    COLOR: 'red'   },
+            { TEXT: '📊 Статус', COMMAND: 'статус',  COLOR: 'blue'  },
+            { TEXT: '❓ Помощь', COMMAND: 'помощь',  COLOR: 'grey'  },
+        ],
     });
 }
 
@@ -697,7 +690,7 @@ app.post('/imbot', async (req, res) => {
             if (cleanMsg === 'пришел' || cleanMsg === 'пришёл') {
                 const lastMark = await getLastMark(FROM_USER_ID);
                 if (lastMark && lastMark.type === 'in') {
-                    await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID,
+                    await sendMessage(domain, authToken, botId, DIALOG_ID,
                         '⚠️ У вас уже есть активная отметка прихода. Сначала нажмите кнопку "ушел".');
                     return;
                 }
