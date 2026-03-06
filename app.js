@@ -79,6 +79,40 @@ async function getLastMark(userId) {
     return rows[0] || null;
 }
 
+
+// ─── Генерация приветственного сообщения ──────────────────────────────────────
+function buildGreeting(userName) {
+    const hour = new Date().toLocaleString("ru-RU", { hour: "numeric", hour12: false, timeZone: "Asia/Yekaterinburg" });
+    const h = parseInt(hour);
+    let timeEmoji, timeGreeting;
+    if (h >= 5 && h < 12)  { timeEmoji = "🌅"; timeGreeting = "Доброе утро"; }
+    else if (h >= 12 && h < 17) { timeEmoji = "☀️";  timeGreeting = "Добрый день"; }
+    else if (h >= 17 && h < 22) { timeEmoji = "🌆"; timeGreeting = "Добрый вечер"; }
+    else                          { timeEmoji = "🌙"; timeGreeting = "Доброй ночи"; }
+    const firstName = userName.split(" ")[0];
+    return (
+        `${timeEmoji} ${timeGreeting}, ${firstName}! Рад тебя видеть 😊
+
+` +
+        `Я твой помощник по учёту рабочего времени.
+` +
+        `Не забудь отметиться — это займёт всего пару секунд! ⏱
+
+` +
+        `📌 Что я умею:
+` +
+        `• ✅ Пришёл — зафиксировать начало дня
+` +
+        `• 🚪 Ушёл — зафиксировать конец дня
+` +
+        `• 📊 Статус — посмотреть свои отметки
+` +
+        `• ❓ Помощь — справка
+
+` +
+        `⬇️ Выбирай нужное действие:`
+    );
+}
 // ═════════════════════════════════════════════════════════════════════════════
 //  КЛАВИАТУРЫ
 //
@@ -499,16 +533,7 @@ app.post('/imbot', async (req, res) => {
         // ── Приветствие при первом открытии чата ─────────────────────────────
         // Здесь совмещены приветствие (как в старом файле) + кнопки (новый файл)
         if (event === 'ONIMBOTJOINCHAT') {
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `👋 Привет, ${userName}!\n\n` +
-                `Я веду учёт рабочего времени.\n\n` +
-                `Команды:\n` +
-                `• "пришел" — отметить приход\n` +
-                `• "ушел" — отметить уход\n` +
-                `• "статус" — мои отметки сегодня\n` +
-                `• "помощь" — справка\n\n` +
-                `Или нажимай кнопки ниже 👇`,
-                kb  // ← кнопки прикреплены к приветствию
+            await sendMessage(domain, authToken, botId, DIALOG_ID, buildGreeting(userName), kb);
             );
             return;
         }
@@ -653,18 +678,7 @@ app.post('/imbot', async (req, res) => {
         } else {
             const greetings = ["привет", "hello", "hi", "хай", "здравствуй", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "добрый", "ку", "хэй", "салют", "даров", "дарова"];
             if (greetings.some(g => msgCmd.includes(g) || cleanMsg.includes(g))) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `👋 Привет, ${userName}!
-
-Я веду учёт рабочего времени.
-
-Команды:
-• "пришел" — отметить приход
-• "ушел" — отметить уход
-• "статус" — мои отметки сегодня
-• "помощь" — справка
-
-Или нажимай кнопки ниже 👇`, kb);
+                await sendMessage(domain, authToken, botId, DIALOG_ID, buildGreeting(userName), kb);
             } else {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
                     `❓ Не понимаю "${MESSAGE||COMMAND}".
