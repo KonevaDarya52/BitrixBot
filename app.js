@@ -227,14 +227,42 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
 // Кнопки, которые всегда показываются под сообщением бота.
 // При нажатии кнопка отправляет текст от имени пользователя —
 // он попадает в уже существующую логику if/else без каких-либо изменений.
-// Кнопки KEYBOARD в Bitrix24 imbot не генерируют событий — убраны.
-// Используем быстрые команды через "/" (зарегистрированы через imbot.command.register).
+// Кнопки через ATTACH — единственный способ интерактивных кнопок в Bitrix24 imbot.
+// При нажатии Bitrix24 шлёт событие ONIMBOTMESSAGEADD с текстом из COMMAND.
+function makeKeyboard() {
+    return [{
+        TYPE: 'BUTTONS',
+        BLOCKS: [{
+            TYPE:    'BUTTON',
+            COLOR:   '29B239',
+            TEXT:    '✅ Пришёл',
+            COMMAND: 'пришел',
+        }, {
+            TYPE:    'BUTTON',
+            COLOR:   'FF5752',
+            TEXT:    '🚪 Ушёл',
+            COMMAND: 'ушел',
+        }, {
+            TYPE:    'BUTTON',
+            COLOR:   '2FC6F6',
+            TEXT:    '📊 Статус',
+            COMMAND: 'статус',
+        }, {
+            TYPE:    'BUTTON',
+            COLOR:   '9DA8B4',
+            TEXT:    '❓ Помощь',
+            COMMAND: 'помощь',
+        }]
+    }];
+}
+
 async function sendMessageWithButtons(domain, accessToken, botId, dialogId, message) {
-    console.log(`📤 sendMessage → bot=${botId}, dialog=${dialogId}`);
+    console.log(`📤 sendMessageWithButtons → bot=${botId}, dialog=${dialogId}`);
     return callBitrix(domain, accessToken, 'imbot.message.add', {
         BOT_ID:    botId,
         DIALOG_ID: dialogId,
         MESSAGE:   message,
+        ATTACH:    makeKeyboard(),
     });
 }
 
