@@ -224,58 +224,6 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
     });
 }
 
-// Функция для отправки сообщения с КНОПКАМИ (клавиатурой)
-async function sendMessageWithKeyboard(domain, accessToken, botId, dialogId, message) {
-    console.log(`📤 sendMessageWithKeyboard → bot=${botId}, dialog=${dialogId}`);
-    
-    // Создаем клавиатуру с кнопками
-    const keyboard = [
-        [
-            {
-                TEXT: '✅ Пришел',
-                COMMAND: 'пришел',
-                BG_COLOR: '#2ecc71',
-                TEXT_COLOR: '#ffffff',
-                DISPLAY: 'LINE',
-                ACTION: 'COMMAND'  // Отправляет команду как сообщение
-            },
-            {
-                TEXT: '🚪 Ушел',
-                COMMAND: 'ушел',
-                BG_COLOR: '#e74c3c',
-                TEXT_COLOR: '#ffffff',
-                DISPLAY: 'LINE',
-                ACTION: 'COMMAND'
-            }
-        ],
-        [
-            {
-                TEXT: '📊 Статус',
-                COMMAND: 'статус',
-                BG_COLOR: '#3498db',
-                TEXT_COLOR: '#ffffff',
-                DISPLAY: 'LINE',
-                ACTION: 'COMMAND'
-            },
-            {
-                TEXT: '❓ Помощь',
-                COMMAND: 'помощь',
-                BG_COLOR: '#95a5a6',
-                TEXT_COLOR: '#ffffff',
-                DISPLAY: 'LINE',
-                ACTION: 'COMMAND'
-            }
-        ]
-    ];
-    
-    return callBitrix(domain, accessToken, 'imbot.message.add', {
-        BOT_ID:    botId,
-        DIALOG_ID: dialogId,
-        MESSAGE:   message,
-        KEYBOARD:  keyboard  // Добавляем клавиатуру
-    });
-}
-
 async function notifyManager(domain, accessToken, text) {
     return callBitrix(domain, accessToken, 'im.notify.system.add', {
         USER_ID: MANAGER_ID,
@@ -297,12 +245,10 @@ async function registerBot(domain, accessToken, existingBotId) {
     console.log('🤖 Регистрируем бота...');
     const resp = await callBitrix(domain, accessToken, 'imbot.register', {
         CODE:                  'attendance_bot',
-        TYPE:                  'B',
+        TYPE:                  'H',
         EVENT_MESSAGE_ADD:     handlerUrl,
         EVENT_WELCOME_MESSAGE: handlerUrl,
         EVENT_BOT_DELETE:      handlerUrl,
-        EVENT_KEYBOARD_ACTION: handlerUrl,
-        KEYBOARD:              'Y',  // 👈 обязательно!
         PROPERTIES: {
             NAME:          'Учёт времени',
             COLOR:         'GREEN',
@@ -377,17 +323,12 @@ app.post('/install', async (req, res) => {
 <body>
 <div class="card">
     <h1>🤖 Бот "Учёт времени" установлен!</h1>
-    <p>Найдите бота в списке чатов Битрикс24 — под сообщениями появятся кнопки:</p>
+    <p>Найдите бота в списке чатов Битрикс24 и напишите одну из команд:</p>
     <br>
-    <div style="display:flex; gap:10px; justify-content:center; margin:20px 0;">
-        <div style="background:#2ecc71; color:white; padding:10px 20px; border-radius:8px;">✅ Пришел</div>
-        <div style="background:#e74c3c; color:white; padding:10px 20px; border-radius:8px;">🚪 Ушел</div>
-    </div>
-    <div style="display:flex; gap:10px; justify-content:center;">
-        <div style="background:#3498db; color:white; padding:10px 20px; border-radius:8px;">📊 Статус</div>
-        <div style="background:#95a5a6; color:white; padding:10px 20px; border-radius:8px;">❓ Помощь</div>
-    </div>
-    <p style="margin-top:30px; font-size:14px;">Кнопки появятся после первого сообщения от бота</p>
+    <div class="cmd">пришел</div><br>
+    <div class="cmd">ушел</div><br>
+    <div class="cmd">статус</div><br>
+    <div class="cmd">помощь</div>
 </div>
 <script>
     BX24.init(function() { BX24.installFinish(); });
@@ -508,7 +449,7 @@ app.post('/confirm-geo', async (req, res) => {
 
     await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, true);
 
-    await sendMessageWithKeyboard(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
+    await sendMessage(rec.domain, rec.access_token, rec.bot_id, rec.dialog_id,
         `${emoji} ${typeLabel} зафиксирован в ${time}\n📍 В офисе`
     );
 
@@ -517,7 +458,7 @@ app.post('/confirm-geo', async (req, res) => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ВЕБХУК БОТА (обработка сообщений и нажатий на кнопки)
+//  ВЕБХУК БОТА
 // ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/imbot', async (req, res) => {
@@ -538,29 +479,17 @@ app.post('/imbot', async (req, res) => {
 
         const params = data.PARAMS || data.params || data;
 
-        let MESSAGE      = params.MESSAGE      || params.message      || '';
-        let DIALOG_ID    = params.DIALOG_ID    || params.dialog_id    || '';
-        let BOT_ID       = params.BOT_ID       || params.bot_id       || '';
-        let FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || '';
-        let USER_NAME    = params.USER_NAME    || params.user_name    || '';
+        const MESSAGE      = params.MESSAGE      || params.message      || '';
+        const DIALOG_ID    = params.DIALOG_ID    || params.dialog_id    || '';
+        const BOT_ID       = params.BOT_ID       || params.bot_id       || '';
+        const FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || '';
+        const USER_NAME    = params.USER_NAME    || params.user_name    || '';
 
         const domain   = auth.domain       || auth.DOMAIN       || BITRIX_DOMAIN;
         let authToken  = auth.access_token || auth.ACCESS_TOKEN || '';
         const userName = USER_NAME || `Пользователь ${FROM_USER_ID}`;
-        
-        // Обработка нажатия на кнопку (KEYBOARD ACTION)
-        if (event === 'ONIMKEYBOARDACTION') {
-            const command = (params.COMMAND || params.command || '').toLowerCase().trim();
-            console.log(`🎯 Нажата кнопка с командой: "${command}"`);
-            
-            // Подменяем MESSAGE на команду от кнопки
-            MESSAGE = command;
-            
-            // Если нет DIALOG_ID, пытаемся получить из других полей
-            if (!DIALOG_ID) {
-                DIALOG_ID = params.DIALOG_ID || params.dialog_id || '';
-            }
-        }
+        const cleanMsg = MESSAGE.toLowerCase().trim();
+        const geoUrl   = `https://${APP_DOMAIN}/geo`;
 
         console.log(`📨 event=${event} domain=${domain} user=${userName} msg="${MESSAGE}"`);
 
@@ -589,117 +518,103 @@ app.post('/imbot', async (req, res) => {
         }
 
         if (event === 'ONIMBOTJOINCHAT') {
-            // При первом открытии бота показываем приветствие С КНОПКАМИ
-            await sendMessageWithKeyboard(domain, authToken, botId, DIALOG_ID,
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `👋 Привет, ${userName}!\n\n` +
-                `Я бот для учёта рабочего времени. Используй кнопки ниже:\n` +
-                `• "Пришел" — отметить приход (откроет страницу с геолокацией)\n` +
-                `• "Ушел" — отметить уход (откроет страницу с геолокацией)\n` +
-                `• "Статус" — мои отметки за сегодня\n` +
-                `• "Помощь" — справка`
+                `Команды:\n` +
+                `• "пришел" — отметить приход\n` +
+                `• "ушел" — отметить уход\n` +
+                `• "статус" — мои отметки сегодня\n` +
+                `• "помощь" — справка`
             );
             return;
         }
 
-        // Обрабатываем команды (как от кнопок, так и текстовые)
-        if (event === 'ONIMBOTMESSAGEADD' || event === 'ONIMKEYBOARDACTION') {
-            
-            if (MESSAGE === 'пришел' || MESSAGE === 'пришёл') {
-                const lastMark = await getLastMark(FROM_USER_ID);
-                if (lastMark && lastMark.type === 'in') {
-                    await sendMessageWithKeyboard(domain, authToken, botId, DIALOG_ID,
-                        '⚠️ У вас уже есть активная отметка прихода. Сначала нажмите "Ушел".');
-                    return;
-                }
-                
-                // Создаем токен для геолокации
-                const token = makeToken();
-                await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'in');
-                
-                // Отправляем ссылку для геолокации
-                await sendMessageWithKeyboard(domain, authToken, botId, DIALOG_ID,
-                    `📍 Нажми на ссылку чтобы подтвердить приход:\n\n👉 https://${APP_DOMAIN}/geo?token=${token}\n\n_Ссылка действительна 15 минут_`
-                );
-                
-            } else if (MESSAGE === 'ушел' || MESSAGE === 'ушёл') {
-                const lastMark = await getLastMark(FROM_USER_ID);
-                if (!lastMark || lastMark.type !== 'in') {
-                    await sendMessageWithKeyboard(domain, authToken, botId, DIALOG_ID,
-                        '⚠️ Нет активной отметки прихода. Сначала нажмите "Пришел".');
-                    return;
-                }
-                
-                // Создаем токен для геолокации
-                const token = makeToken();
-                await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'out');
-                
-                // Отправляем ссылку для геолокации
-                await sendMessageWithKeyboard(domain, authToken, botId, DIALOG_ID,
-                    `📍 Нажми на ссылку чтобы подтвердить уход:\n\n👉 https://${APP_DOMAIN}/geo?token=${token}\n\n_Ссылка действительна 15 минут_`
-                );
-                
-            } else if (MESSAGE === 'статус') {
-                const marks = await getTodayMarks(FROM_USER_ID);
-                if (marks.length === 0) {
-                    await sendMessageWithKeyboard(domain, authToken, botId, DIALOG_ID, `📊 Сегодня отметок нет.`);
-                    return;
-                }
+        if (event !== 'ONIMBOTMESSAGEADD') return;
 
-                let totalSeconds = 0;
-                let lastInTime = null;
-                let lastType = null;
-                const lines = [];
+        if (cleanMsg === 'пришел' || cleanMsg === 'пришёл') {
+    const lastMark = await getLastMark(FROM_USER_ID);
+    if (lastMark && lastMark.type === 'in') {
+        await sendMessage(domain, authToken, botId, DIALOG_ID,
+            '⚠️ У вас уже есть активная отметка прихода. Сначала напишите "ушел".');
+        return;
+    }
+    const token = makeToken();
+    await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'in');
+    await sendMessage(domain, authToken, botId, DIALOG_ID,
+        `📍 Нажми на ссылку — откроется страница геолокации.\n\n👉 ${geoUrl}?token=${token}\n\n_Ссылка действительна 10 минут_`
+    );
+} else if (cleanMsg === 'ушел' || cleanMsg === 'ушёл') {
+    const lastMark = await getLastMark(FROM_USER_ID);
+    if (!lastMark || lastMark.type !== 'in') {
+        await sendMessage(domain, authToken, botId, DIALOG_ID,
+            '⚠️ Нет активной отметки прихода. Сначала напишите "пришел".');
+        return;
+    }
+    const token = makeToken();
+    await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'out');
+    await sendMessage(domain, authToken, botId, DIALOG_ID,
+        `📍 Нажми на ссылку чтобы подтвердить уход:\n\n👉 ${geoUrl}?token=${token}\n\n_Ссылка действительна 10 минут_`
+    );
+} else if (cleanMsg === 'статус') {
+    const marks = await getTodayMarks(FROM_USER_ID);
+    if (marks.length === 0) {
+        await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Сегодня отметок нет.`);
+        return;
+    }
 
-                for (const mark of marks) {
-                    const ts = new Date(mark.timestamp);
-                    const timeStr = ts.toLocaleTimeString('ru-RU', {
-                        hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg'
-                    });
-                    const typeEmoji = mark.type === 'in' ? '✅ Приход' : '🚪 Уход';
-                    const loc = mark.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
+    let totalSeconds = 0;
+    let lastInTime = null;
+    let lastType = null;
+    const lines = [];
 
-                    if (mark.type === 'in') {
-                        lastInTime = ts;
-                        lastType = 'in';
-                        lines.push(`${typeEmoji} в ${timeStr} — ${loc}`);
-                    } else {
-                        if (lastType === 'in' && lastInTime) {
-                            const diff = (ts - lastInTime) / 1000;
-                            totalSeconds += diff;
-                            lines.push(`${typeEmoji} в ${timeStr} — ${loc} (длительность: ${formatDuration(diff)})`);
-                        } else {
-                            lines.push(`${typeEmoji} в ${timeStr} — ${loc}`);
-                        }
-                        lastType = 'out';
-                        lastInTime = null;
-                    }
-                }
+    for (const mark of marks) {
+        const ts = new Date(mark.timestamp);
+        const timeStr = ts.toLocaleTimeString('ru-RU', {
+            hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Yekaterinburg'
+        });
+        const typeEmoji = mark.type === 'in' ? '✅ Приход' : '🚪 Уход';
+        const loc = mark.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
 
-                if (lastType === 'in') {
-                    lines.push('⏳ Есть незавершённый интервал (нет отметки ухода)');
-                }
-
-                const totalHours = Math.floor(totalSeconds / 3600);
-                const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
-                const totalStr = totalSeconds > 0 ? `\n\n⏱ **Всего в офисе:** ${totalHours} ч ${totalMinutes} мин` : '';
-
-                await sendMessageWithKeyboard(domain, authToken, botId, DIALOG_ID,
-                    `📊 Твои отметки сегодня:\n\n${lines.join('\n')}${totalStr}`
-                );
-                
-            } else if (MESSAGE === 'помощь') {
-                await sendMessageWithKeyboard(domain, authToken, botId, DIALOG_ID,
-                    `🤖 Бот учёта посещаемости\n\n` +
-                    `• "Пришел" — отметить приход (откроет ссылку с геолокацией)\n` +
-                    `• "Ушел" — отметить уход (откроет ссылку с геолокацией)\n` +
-                    `• "Статус" — мои отметки за сегодня\n` +
-                    `• "Помощь" — эта справка`
-                );
-
-            } else if (MESSAGE && !MESSAGE.startsWith('https://')) {
-                await sendMessageWithKeyboard(domain, authToken, botId, DIALOG_ID,
-                    `❓ Не понимаю "${MESSAGE}".\nИспользуй кнопки ниже.`);
+        if (mark.type === 'in') {
+            lastInTime = ts;
+            lastType = 'in';
+            lines.push(`${typeEmoji} в ${timeStr} — ${loc}`);
+        } else {
+            if (lastType === 'in' && lastInTime) {
+                const diff = (ts - lastInTime) / 1000;
+                totalSeconds += diff;
+                lines.push(`${typeEmoji} в ${timeStr} — ${loc} (длительность: ${formatDuration(diff)})`);
+            } else {
+                lines.push(`${typeEmoji} в ${timeStr} — ${loc}`);
             }
+            lastType = 'out';
+            lastInTime = null;
+        }
+    }
+
+    if (lastType === 'in') {
+        lines.push('⏳ Есть незавершённый интервал (нет отметки ухода)');
+    }
+
+    const totalHours = Math.floor(totalSeconds / 3600);
+    const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
+    const totalStr = totalSeconds > 0 ? `\n\n⏱ **Всего в офисе:** ${totalHours} ч ${totalMinutes} мин` : '';
+
+    await sendMessage(domain, authToken, botId, DIALOG_ID,
+        `📊 Твои отметки сегодня:\n\n${lines.join('\n')}${totalStr}`
+    );
+} else if (cleanMsg === 'помощь') {
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `🤖 Бот учёта посещаемости\n\n` +
+                `• "пришел" — отметить приход\n` +
+                `• "ушел" — отметить уход\n` +
+                `• "статус" — отметки за сегодня\n` +
+                `• "помощь" — эта справка`
+            );
+
+        } else {
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `❓ Не понимаю "${MESSAGE}".\nНапиши "помощь".`);
         }
 
     } catch (err) {
