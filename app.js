@@ -301,7 +301,8 @@ async function registerBot(domain, accessToken, existingBotId) {
         EVENT_MESSAGE_ADD:     handlerUrl,
         EVENT_WELCOME_MESSAGE: handlerUrl,
         EVENT_BOT_DELETE:      handlerUrl,
-        EVENT_KEYBOARD_ACTION: handlerUrl,  // Важно! Обработка нажатий на кнопки
+        EVENT_KEYBOARD_ACTION: handlerUrl,
+        KEYBOARD:              'Y',  // 👈 обязательно!
         PROPERTIES: {
             NAME:          'Учёт времени',
             COLOR:         'GREEN',
