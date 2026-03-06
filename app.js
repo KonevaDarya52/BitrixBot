@@ -281,6 +281,24 @@ async function registerBot(domain, accessToken, existingBotId) {
     const botId = String(resp?.result || '');
     if (botId) {
         console.log('✅ Бот зарегистрирован, ID:', botId);
+
+        // Регистрируем быстрые команды — появляются при вводе "/" в чате
+        const commands = [
+            { CMD: 'пришел',  TITLE: 'Отметить приход',         PARAMS: '' },
+            { CMD: 'ушел',    TITLE: 'Отметить уход',           PARAMS: '' },
+            { CMD: 'статус',  TITLE: 'Мои отметки за сегодня',  PARAMS: '' },
+            { CMD: 'помощь',  TITLE: 'Справка по командам',     PARAMS: '' },
+        ];
+        for (const cmd of commands) {
+            await callBitrix(domain, accessToken, 'imbot.command.register', {
+                BOT_ID:     botId,
+                COMMAND:    cmd.CMD,
+                TITLE:      cmd.TITLE,
+                PARAMS:     cmd.PARAMS,
+                EVENT_COMMAND_ADD: handlerUrl,
+            });
+        }
+        console.log('✅ Быстрые команды зарегистрированы');
     } else {
         console.error('❌ Ошибка регистрации бота:', JSON.stringify(resp));
     }
