@@ -88,6 +88,12 @@ function makeToken() {
     return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+function formatDuration(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return `${h} ч ${m} мин`;
+}
+
 async function getLastMark(userId) {
     const { rows } = await pool.query(
         `SELECT type, timestamp FROM attendance
@@ -550,7 +556,7 @@ app.post('/imbot', async (req, res) => {
         `📍 Нажми на ссылку чтобы подтвердить уход:\n\n👉 ${geoUrl}?token=${token}\n\n_Ссылка действительна 10 минут_`
     );
 } else if (cleanMsg === 'статус') {
-    const marks = await getTodayMarks(FROM_USER_ID); // уже отсортированы по возрастанию времени
+    const marks = await getTodayMarks(FROM_USER_ID);
     if (marks.length === 0) {
         await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Сегодня отметок нет.`);
         return;
@@ -570,30 +576,26 @@ app.post('/imbot', async (req, res) => {
         const loc = mark.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
 
         if (mark.type === 'in') {
-            // Начало нового интервала
             lastInTime = ts;
             lastType = 'in';
             lines.push(`${typeEmoji} в ${timeStr} — ${loc}`);
-        } else { // out
+        } else {
             if (lastType === 'in' && lastInTime) {
-                const diff = (ts - lastInTime) / 1000; // секунды
+                const diff = (ts - lastInTime) / 1000;
                 totalSeconds += diff;
                 lines.push(`${typeEmoji} в ${timeStr} — ${loc} (длительность: ${formatDuration(diff)})`);
             } else {
-                // На случай непарного out (маловероятно при новых проверках)
                 lines.push(`${typeEmoji} в ${timeStr} — ${loc}`);
             }
             lastType = 'out';
-            lastInTime = null; // интервал закрыт
+            lastInTime = null;
         }
     }
 
-    // Если остался незакрытый приход
     if (lastType === 'in') {
         lines.push('⏳ Есть незавершённый интервал (нет отметки ухода)');
     }
 
-    // Формируем итоговое сообщение
     const totalHours = Math.floor(totalSeconds / 3600);
     const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
     const totalStr = totalSeconds > 0 ? `\n\n⏱ **Всего в офисе:** ${totalHours} ч ${totalMinutes} мин` : '';
