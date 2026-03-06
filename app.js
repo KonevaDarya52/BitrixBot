@@ -649,10 +649,27 @@ app.post('/imbot', async (req, res) => {
             }); else text += `Никого нет.`;
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
-        // ── НЕИЗВЕСТНАЯ КОМАНДА ───────────────────────────────────────────────
+        // ── НЕИЗВЕСТНАЯ КОМАНДА / ПРИВЕТСТВИЕ ───────────────────────────────
         } else {
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `❓ Не понимаю "${MESSAGE||COMMAND}".\nВоспользуйся кнопками 👇`, kb);
+            const greetings = ["привет", "hello", "hi", "хай", "здравствуй", "здравствуйте", "добрый день", "добрый вечер", "доброе утро", "добрый", "ку", "хэй", "салют", "даров", "дарова"];
+            if (greetings.some(g => msgCmd.includes(g) || cleanMsg.includes(g))) {
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    `👋 Привет, ${userName}!
+
+Я веду учёт рабочего времени.
+
+Команды:
+• "пришел" — отметить приход
+• "ушел" — отметить уход
+• "статус" — мои отметки сегодня
+• "помощь" — справка
+
+Или нажимай кнопки ниже 👇`, kb);
+            } else {
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    `❓ Не понимаю "${MESSAGE||COMMAND}".
+Воспользуйся кнопками 👇`, kb);
+            }
         }
 
     } catch (err) {
