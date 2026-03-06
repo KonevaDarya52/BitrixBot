@@ -94,16 +94,6 @@ function formatDuration(seconds) {
     return `${h} ч ${m} мин`;
 }
 
-function getMainKeyboard(botId) {
-    return {
-        BUTTONS: [
-            [ { TEXT: "✅ Пришел", COMMAND: "пришел" } ],
-            [ { TEXT: "🚪 Ушел", COMMAND: "ушел" } ],
-            [ { TEXT: "📊 Статус", COMMAND: "статус" }, { TEXT: "❓ Помощь", COMMAND: "помощь" } ]
-        ]
-    };
-}
-
 async function getLastMark(userId) {
     const { rows } = await pool.query(
         `SELECT type, timestamp FROM attendance
@@ -225,19 +215,13 @@ async function callBitrix(domain, accessToken, method, params = {}) {
     }
 }
 
-async function sendMessage(domain, accessToken, botId, dialogId, message, keyboard = null) {
+async function sendMessage(domain, accessToken, botId, dialogId, message) {
     console.log(`📤 sendMessage → bot=${botId}, dialog=${dialogId}`);
-    const params = {
+    return callBitrix(domain, accessToken, 'imbot.message.add', {
         BOT_ID:    botId,
         DIALOG_ID: dialogId,
         MESSAGE:   message,
-    };
-    if (keyboard) {
-        params.KEYBOARD = keyboard;
-        console.log('KEYBOARD object:', JSON.stringify(keyboard));
-    }
-    console.log('sendMessage params:', JSON.stringify(params));
-    return callBitrix(domain, accessToken, 'imbot.message.add', params);
+    });
 }
 
 async function notifyManager(domain, accessToken, text) {
@@ -540,8 +524,7 @@ app.post('/imbot', async (req, res) => {
                 `• "пришел" — отметить приход\n` +
                 `• "ушел" — отметить уход\n` +
                 `• "статус" — мои отметки сегодня\n` +
-                `• "помощь" — справка`,
-                getMainKeyboard(botId) 
+                `• "помощь" — справка`
             );
             return;
         }
@@ -626,8 +609,7 @@ app.post('/imbot', async (req, res) => {
                 `• "пришел" — отметить приход\n` +
                 `• "ушел" — отметить уход\n` +
                 `• "статус" — отметки за сегодня\n` +
-                `• "помощь" — эта справка`,
-                getMainKeyboard(botId)
+                `• "помощь" — эта справка`
             );
 
         } else {
@@ -751,5 +733,4 @@ initDB().then(() => {
     console.error('❌ Ошибка подключения к БД:', err.message);
     process.exit(1);
 });
-
 
