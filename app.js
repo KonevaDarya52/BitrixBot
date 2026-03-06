@@ -224,8 +224,9 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
     });
 }
 
-// TYPE: 'text' — при нажатии кнопка отправляет COMMAND как сообщение от пользователя.
-// Без TYPE кнопка визуально нажимается, но команду в чат не отправляет.
+// Кнопки, которые всегда показываются под сообщением бота.
+// При нажатии кнопка отправляет текст от имени пользователя —
+// он попадает в уже существующую логику if/else без каких-либо изменений.
 const MAIN_KEYBOARD = [
     { TYPE: 'text', TEXT: '✅ Пришёл',  COMMAND: 'пришел',  COLOR: 'green' },
     { TYPE: 'text', TEXT: '🚪 Ушёл',   COMMAND: 'ушел',    COLOR: 'red'   },
@@ -498,7 +499,9 @@ app.post('/imbot', async (req, res) => {
 
         const params = data.PARAMS || data.params || data;
 
+        // Bitrix24 при нажатии кнопки может слать команду в COMMAND, а не в MESSAGE
         const MESSAGE      = params.MESSAGE      || params.message      || '';
+        const COMMAND_FIELD = params.COMMAND     || params.command      || '';
         const DIALOG_ID    = params.DIALOG_ID    || params.dialog_id    || '';
         const BOT_ID       = params.BOT_ID       || params.bot_id       || '';
         const FROM_USER_ID = params.FROM_USER_ID || params.from_user_id || '';
@@ -507,7 +510,10 @@ app.post('/imbot', async (req, res) => {
         const domain   = auth.domain       || auth.DOMAIN       || BITRIX_DOMAIN;
         let authToken  = auth.access_token || auth.ACCESS_TOKEN || '';
         const userName = USER_NAME || `Пользователь ${FROM_USER_ID}`;
-        const cleanMsg = MESSAGE.toLowerCase().trim();
+        // cleanMsg — берём MESSAGE, если пусто — смотрим COMMAND (от кнопки)
+        const cleanMsg = (MESSAGE || COMMAND_FIELD).toLowerCase().trim();
+        console.log(`🔍 MESSAGE="${MESSAGE}" COMMAND_FIELD="${COMMAND_FIELD}" cleanMsg="${cleanMsg}"`);
+        console.log(`🔍 params keys: ${Object.keys(params).join(', ')}`);
         const geoUrl   = `https://${APP_DOMAIN}/geo`;
 
         console.log(`📨 event=${event} domain=${domain} user=${userName} msg="${MESSAGE}"`);
