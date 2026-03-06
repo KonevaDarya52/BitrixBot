@@ -224,6 +224,29 @@ async function sendMessage(domain, accessToken, botId, dialogId, message) {
     });
 }
 
+// Кнопки через ATTACH — при нажатии Bitrix24 шлёт ONIMBOTMESSAGEADD с текстом COMMAND
+function makeKeyboard() {
+    return [{
+        TYPE: 'BUTTONS',
+        BLOCKS: [
+            { TYPE: 'BUTTON', COLOR: '29B239', TEXT: '✅ Пришёл',  COMMAND: 'пришел'  },
+            { TYPE: 'BUTTON', COLOR: 'FF5752', TEXT: '🚪 Ушёл',   COMMAND: 'ушел'    },
+            { TYPE: 'BUTTON', COLOR: '2FC6F6', TEXT: '📊 Статус', COMMAND: 'статус'  },
+            { TYPE: 'BUTTON', COLOR: '9DA8B4', TEXT: '❓ Помощь', COMMAND: 'помощь'  },
+        ]
+    }];
+}
+
+async function sendMessageWithButtons(domain, accessToken, botId, dialogId, message) {
+    console.log(`📤 sendMessageWithButtons → bot=${botId}, dialog=${dialogId}`);
+    return callBitrix(domain, accessToken, 'imbot.message.add', {
+        BOT_ID:    botId,
+        DIALOG_ID: dialogId,
+        MESSAGE:   message,
+        ATTACH:    makeKeyboard(),
+    });
+}
+
 async function notifyManager(domain, accessToken, text) {
     return callBitrix(domain, accessToken, 'im.notify.system.add', {
         USER_ID: MANAGER_ID,
@@ -674,27 +697,27 @@ app.post('/imbot', async (req, res) => {
             if (cleanMsg === 'пришел' || cleanMsg === 'пришёл') {
                 const lastMark = await getLastMark(FROM_USER_ID);
                 if (lastMark && lastMark.type === 'in') {
-                    await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID,
                         '⚠️ У вас уже есть активная отметка прихода. Сначала нажмите кнопку "ушел".');
                     return;
                 }
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID,
                     `📍 Для отметки прихода нажмите кнопку "пришел" в чате — она откроет страницу с геолокацией.`);
                 
             } else if (cleanMsg === 'ушел' || cleanMsg === 'ушёл') {
                 const lastMark = await getLastMark(FROM_USER_ID);
                 if (!lastMark || lastMark.type !== 'in') {
-                    await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID,
                         '⚠️ Нет активной отметки прихода. Сначала нажмите кнопку "пришел".');
                     return;
                 }
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID,
                     `📍 Для отметки ухода нажмите кнопку "ушел" в чате — она откроет страницу с геолокацией.`);
                 
             } else if (cleanMsg === 'статус') {
                 const marks = await getTodayMarks(FROM_USER_ID);
                 if (marks.length === 0) {
-                    await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Сегодня отметок нет.`);
+                    await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID, `📊 Сегодня отметок нет.`);
                     return;
                 }
 
@@ -736,12 +759,12 @@ app.post('/imbot', async (req, res) => {
                 const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
                 const totalStr = totalSeconds > 0 ? `\n\n⏱ **Всего в офисе:** ${totalHours} ч ${totalMinutes} мин` : '';
 
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID,
                     `📊 Твои отметки сегодня:\n\n${lines.join('\n')}${totalStr}`
                 );
                 
             } else if (cleanMsg === 'помощь') {
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID,
                     `🤖 Бот учёта посещаемости\n\n` +
                     `Используйте кнопки в чате:\n` +
                     `• "пришел" — отметить приход (откроет страницу с геолокацией)\n` +
@@ -751,12 +774,12 @@ app.post('/imbot', async (req, res) => {
                 );
 
             } else if (cleanMsg) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID,
                     `❓ Не понимаю "${MESSAGE}".\nИспользуйте кнопки в чате.`);
             }
         } else if (event === 'ONIMBOTJOINCHAT') {
             // Приветственное сообщение
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
+            await sendMessageWithButtons(domain, authToken, botId, DIALOG_ID,
                 `👋 Привет, ${userName}!\n\n` +
                 `Я бот для учёта рабочего времени. Используй кнопки в чате:\n` +
                 `• "пришел" — отметить приход\n` +
