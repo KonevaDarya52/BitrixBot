@@ -534,7 +534,6 @@ app.post('/imbot', async (req, res) => {
         // Здесь совмещены приветствие (как в старом файле) + кнопки (новый файл)
         if (event === 'ONIMBOTJOINCHAT') {
             await sendMessage(domain, authToken, botId, DIALOG_ID, buildGreeting(userName), kb);
-            );
             return;
         }
 
