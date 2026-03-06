@@ -552,15 +552,14 @@ app.post('/imbot', async (req, res) => {
             return;
         }
 
-        // Нажатие кнопки приходит как ONIMKEYBOARDACTION — извлекаем команду из него
+        // Нажатие кнопки приходит как отдельное событие ONIMKEYBOARDACTION
         if (event === 'ONIMKEYBOARDACTION') {
             const btnCommand = (params.COMMAND || params.command || '').toLowerCase().trim();
-            console.log(`🎹 KEYBOARD ACTION: command="${btnCommand}"`);
+            console.log(`🎹 KEYBOARD ACTION: command="${btnCommand}" params=${JSON.stringify(params)}`);
             if (btnCommand) {
-                // Подменяем тело запроса и пускаем через ту же логику что и текст
-                req.body.data = req.body.data || req.body.DATA || {};
-                const p = req.body.data.PARAMS || req.body.data.params || req.body.data;
-                p.MESSAGE = btnCommand;
+                // Подменяем MESSAGE на команду от кнопки и идём дальше
+                params.MESSAGE = btnCommand;
+                params.message = btnCommand;
             } else {
                 return;
             }
