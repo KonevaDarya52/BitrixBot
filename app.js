@@ -21,11 +21,10 @@ const OFFICE_LON    = parseFloat(process.env.OFFICE_LON    || '65.592076');
 const OFFICE_RADIUS = parseInt(process.env.OFFICE_RADIUS   || '100');
 const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
 
-// Email — куда отправлять отчёты
 const REPORT_EMAIL = process.env.REPORT_EMAIL || 'koneva_dashenka06@vk.com';
-// SMTP — задай в Render: SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS
+// ИСПРАВЛЕНИЕ 1: используем порт 587 + STARTTLS вместо 465+SSL (465 заблокирован на Render)
 const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
-const SMTP_PORT = parseInt(process.env.SMTP_PORT || '465');
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587');
 const SMTP_USER = process.env.SMTP_USER || '';
 const SMTP_PASS = process.env.SMTP_PASS || '';
 
@@ -52,13 +51,11 @@ async function initDB() {
         access_token TEXT NOT NULL, type TEXT NOT NULL,
         created_at TIMESTAMPTZ DEFAULT NOW())`);
 
-    // Администраторы — кто имеет доступ к админ-панели
     await pool.query(`CREATE TABLE IF NOT EXISTS admins (
         user_id TEXT PRIMARY KEY,
         user_name TEXT,
         added_at TIMESTAMPTZ DEFAULT NOW())`);
 
-    // Расписание — отпуска, больничные, выходные и т.д.
     await pool.query(`CREATE TABLE IF NOT EXISTS schedules (
         id SERIAL PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -70,13 +67,20 @@ async function initDB() {
         created_by TEXT,
         created_at TIMESTAMPTZ DEFAULT NOW())`);
 
-    // Ожидание пользовательского ввода (многошаговые диалоги)
     await pool.query(`CREATE TABLE IF NOT EXISTS pending_input (
         user_id TEXT PRIMARY KEY,
         action TEXT NOT NULL,
         step TEXT,
         data JSONB DEFAULT '{}',
         created_at TIMESTAMPTZ DEFAULT NOW())`);
+
+    // Реестр сотрудников — все известные боту пользователи Битрикс24
+    await pool.query(`CREATE TABLE IF NOT EXISTS employees (
+        user_id TEXT PRIMARY KEY,
+        user_name TEXT NOT NULL,
+        domain TEXT,
+        first_seen TIMESTAMPTZ DEFAULT NOW(),
+        last_seen TIMESTAMPTZ DEFAULT NOW())`);
 
     console.log('✅ БД инициализирована');
 }
@@ -129,7 +133,6 @@ function parseDate(str) {
     return isNaN(d.getTime()) ? null : d.toISOString().slice(0,10);
 }
 
-// ─── Метки расписания ─────────────────────────────────────────────────────────
 const SCHED_LABELS = {
     vacation: '🏖 Отпуск',
     sick:     '🤒 Больничный',
@@ -156,7 +159,7 @@ async function addAdmin(userId, userName) {
 }
 
 async function removeAdmin(userId) {
-    if (String(userId) === String(MANAGER_ID)) return; // главного нельзя удалить
+    if (String(userId) === String(MANAGER_ID)) return;
     await pool.query(`DELETE FROM admins WHERE user_id = $1`, [String(userId)]);
 }
 
@@ -185,7 +188,7 @@ async function clearPending(userId) {
     await pool.query(`DELETE FROM pending_input WHERE user_id=$1`, [String(userId)]);
 }
 
-// ─── Посещаемость ────────────────────────────────────────────────────────────
+// ─── Посещаемость ─────────────────────────────────────────────────────────────
 
 async function getLastMark(userId) {
     const { rows } = await pool.query(
@@ -232,7 +235,92 @@ async function getSchedulesToday() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ПРИВЕТСТВИЕ — зависит от того, отмечался ли человек сегодня
+//  ИСПРАВЛЕНИЕ 2: поиск сотрудников через Bitrix24 API
+// ═════════════════════════════════════════════════════════════════════════════
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  РЕЕСТР СОТРУДНИКОВ
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Регистрирует/обновляет сотрудника в реестре. Вызывается при любом взаимодействии.
+async function registerEmployee(userId, userName, domain) {
+    if (!userId || !userName) return;
+    await pool.query(
+        `INSERT INTO employees (user_id, user_name, domain, first_seen, last_seen)
+         VALUES ($1, $2, $3, NOW(), NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+             user_name = EXCLUDED.user_name,
+             last_seen = NOW()`,
+        [String(userId), userName, domain]
+    );
+}
+
+// Подтягивает всех активных пользователей из Битрикс24 и регистрирует их
+async function syncAllEmployees(domain, accessToken) {
+    try {
+        let start = 0, total = 0;
+        do {
+            const resp = await callBitrix(domain, accessToken, 'user.get', {
+                ACTIVE: true,
+                start,
+            });
+            if (!resp?.result?.length) break;
+            for (const u of resp.result) {
+                const name = `${u.NAME || ''} ${u.LAST_NAME || ''}`.trim();
+                if (name) await registerEmployee(String(u.ID), name, domain);
+            }
+            total = resp.total || 0;
+            start += resp.result.length;
+        } while (start < total);
+        console.log(`✅ Синхронизировано сотрудников: ${start}`);
+        return start;
+    } catch (err) {
+        console.error('❌ syncAllEmployees:', err.message);
+        return 0;
+    }
+}
+
+async function searchBitrixUsers(domain, accessToken, query) {
+    // Поиск по имени/фамилии через user.search
+    const resp = await callBitrix(domain, accessToken, 'user.search', {
+        NAME: query,
+        ACTIVE: true,
+    });
+    let users = [];
+    if (resp?.result && Array.isArray(resp.result)) {
+        users = resp.result;
+    }
+    // Если ничего не нашли по имени, пробуем по фамилии
+    if (!users.length) {
+        const resp2 = await callBitrix(domain, accessToken, 'user.search', {
+            LAST_NAME: query,
+            ACTIVE: true,
+        });
+        if (resp2?.result && Array.isArray(resp2.result)) {
+            users = resp2.result;
+        }
+    }
+    return users.map(u => ({
+        id:   String(u.ID),
+        name: `${u.NAME || ''} ${u.LAST_NAME || ''}`.trim(),
+        dept: u.UF_DEPARTMENT ? String(u.UF_DEPARTMENT) : '',
+    }));
+}
+
+async function getBitrixUser(domain, accessToken, userId) {
+    const resp = await callBitrix(domain, accessToken, 'user.get', { ID: userId });
+    if (resp?.result && resp.result.length) {
+        const u = resp.result[0];
+        return {
+            id:   String(u.ID),
+            name: `${u.NAME || ''} ${u.LAST_NAME || ''}`.trim(),
+        };
+    }
+    return null;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  ПРИВЕТСТВИЕ
 // ═════════════════════════════════════════════════════════════════════════════
 
 function buildGreeting(userName, firstName, adminMode, alreadyMarked) {
@@ -284,7 +372,6 @@ function buildGreeting(userName, firstName, adminMode, alreadyMarked) {
 //  КЛАВИАТУРЫ
 // ═════════════════════════════════════════════════════════════════════════════
 
-// Обычный пользователь
 function kbMain() {
     return [
         { TEXT:'✅ Пришёл',  COMMAND:'arrived', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' },
@@ -295,7 +382,6 @@ function kbMain() {
     ];
 }
 
-// Обычный пользователь с доступом в админку — показывается кнопка входа
 function kbMainAdmin() {
     return [
         { TEXT:'✅ Пришёл',  COMMAND:'arrived', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' },
@@ -308,7 +394,6 @@ function kbMainAdmin() {
     ];
 }
 
-// Главная панель администратора
 function kbAdmin() {
     return [
         { TEXT:'📋 Отчёт сегодня',   COMMAND:'report_today', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
@@ -325,7 +410,6 @@ function kbAdmin() {
     ];
 }
 
-// Подменю расписания
 function kbSchedule() {
     return [
         { TEXT:'🏖 Отпуск',       COMMAND:'sched_vacation', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#f4a724', TEXT_COLOR:'#ffffff' },
@@ -342,7 +426,6 @@ function kbSchedule() {
     ];
 }
 
-// Подменю управления администраторами
 function kbAdminManage() {
     return [
         { TEXT:'➕ Добавить админа', COMMAND:'admin_add',    COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' },
@@ -354,7 +437,6 @@ function kbAdminManage() {
     ];
 }
 
-// Кнопки выбора периода для отправки по email
 function kbEmailPeriod() {
     return [
         { TEXT:'📋 Сегодня',  COMMAND:'email_today', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
@@ -382,13 +464,32 @@ function kbCancel() {
     ];
 }
 
-// Выбрать нужную главную клавиатуру: если isAdmin — показываем кнопку входа
+// Кнопки подтверждения найденного сотрудника (до 5 вариантов)
+function kbUserSelect(users) {
+    const btns = [];
+    users.slice(0, 5).forEach((u, i) => {
+        if (i > 0 && i % 2 === 0) btns.push({ TYPE:'NEWLINE' });
+        btns.push({
+            TEXT: u.name,
+            COMMAND: `select_user_${i}`,
+            COMMAND_PARAMS: '',
+            DISPLAY: 'LINE',
+            BG_COLOR: '#5b8def',
+            TEXT_COLOR: '#ffffff',
+        });
+    });
+    btns.push({ TYPE:'NEWLINE' });
+    btns.push({ TEXT:'🔍 Искать снова', COMMAND:'sched_search_again', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#e07b29', TEXT_COLOR:'#ffffff' });
+    btns.push({ TEXT:'❌ Отмена',       COMMAND:'cancel_input',       COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' });
+    return btns;
+}
+
 async function mainKb(userId) {
     return (await isAdmin(userId)) ? kbMainAdmin() : kbMain();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  EXCEL / EMAIL
+//  ИСПРАВЛЕНИЕ 1: EXCEL / EMAIL — порт 587 + STARTTLS
 // ═════════════════════════════════════════════════════════════════════════════
 
 async function buildExcelReport(period) {
@@ -398,7 +499,6 @@ async function buildExcelReport(period) {
     let title, sheetData;
     const today = todaySV();
 
-    // ── Лист 1: Отметки ───────────────────────────────────────────────────────
     if (period === 'today') {
         title = `Отчёт за ${new Date().toLocaleDateString('ru-RU')}`;
         const { rows } = await pool.query(`
@@ -410,9 +510,9 @@ async function buildExcelReport(period) {
             WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1::date
             GROUP BY user_id, user_name ORDER BY user_name`, [today]);
         sheetData = rows.map(r => ({
-            name: r.user_name || r.user_id,
-            in:   r.in_time  ? tzTime(r.in_time)  : '—',
-            out:  r.out_time ? tzTime(r.out_time) : '🟢 в офисе',
+            name:   r.user_name || r.user_id,
+            in:     r.in_time  ? tzTime(r.in_time)  : '—',
+            out:    r.out_time ? tzTime(r.out_time) : '🟢 в офисе',
             status: r.out_time ? '✅ Ушёл' : '🟢 В офисе',
         }));
     } else if (period === 'week') {
@@ -435,7 +535,6 @@ async function buildExcelReport(period) {
 
     const sheet = workbook.addWorksheet('Отметки');
 
-    // Заголовок
     sheet.mergeCells('A1:E1');
     const titleCell = sheet.getCell('A1');
     titleCell.value = title;
@@ -443,10 +542,8 @@ async function buildExcelReport(period) {
     titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
     titleCell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFe8f0fe' } };
     sheet.getRow(1).height = 28;
-
     sheet.addRow([]);
 
-    // Шапка таблицы
     let headers;
     if (period === 'today') {
         headers = ['Сотрудник', 'Приход', 'Уход', 'Статус'];
@@ -462,7 +559,6 @@ async function buildExcelReport(period) {
     });
     headerRow.height = 22;
 
-    // Данные
     sheetData.forEach((r, i) => {
         let row;
         if (period === 'today') {
@@ -475,16 +571,13 @@ async function buildExcelReport(period) {
                 cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFf5f8ff' } };
             });
         }
-        row.eachCell(cell => {
-            cell.alignment = { vertical:'middle' };
-        });
+        row.eachCell(cell => { cell.alignment = { vertical:'middle' }; });
         row.height = 20;
     });
 
-    // ── Лист 2: Расписание ────────────────────────────────────────────────────
+    // Лист расписания
     const schedRows = await pool.query(
         `SELECT * FROM schedules WHERE date_to >= $1 ORDER BY date_from, user_name`, [today]);
-
     if (schedRows.rows.length) {
         const sheet2 = workbook.addWorksheet('Расписание');
         sheet2.mergeCells('A1:E1');
@@ -495,14 +588,12 @@ async function buildExcelReport(period) {
         t2.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFfff3e0' } };
         sheet2.getRow(1).height = 26;
         sheet2.addRow([]);
-
         const sh2 = sheet2.addRow(['Сотрудник', 'Статус', 'Дата начала', 'Дата конца', 'Комментарий']);
         sh2.eachCell(cell => {
             cell.font = { bold:true, color:{ argb:'FFFFFFFF' } };
             cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFE07B29' } };
             cell.alignment = { horizontal:'center' };
         });
-
         schedRows.rows.forEach((r, i) => {
             const row = sheet2.addRow([
                 r.user_name,
@@ -513,11 +604,9 @@ async function buildExcelReport(period) {
             ]);
             if (i % 2 === 0) row.eachCell(c => { c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFfff8f0' } }; });
         });
-
         sheet2.columns = [{ width:24 },{ width:18 },{ width:16 },{ width:16 },{ width:30 }];
     }
 
-    // Ширина колонок листа 1
     if (period === 'today') {
         sheet.columns = [{ width:26 },{ width:12 },{ width:14 },{ width:16 }];
     } else {
@@ -535,18 +624,27 @@ async function sendReportByEmail(period) {
     }
     try {
         const { file, title } = await buildExcelReport(period);
+
+        // ИСПРАВЛЕНИЕ: порт 587 + STARTTLS (порт 465 заблокирован на Render)
         const transporter = nodemailer.createTransport({
-            host: SMTP_HOST, port: SMTP_PORT,
-            secure: SMTP_PORT === 465,
-            auth: { user: SMTP_USER, pass: SMTP_PASS },
+            host:   SMTP_HOST,
+            port:   SMTP_PORT,
+            secure: SMTP_PORT === 465,   // false для 587
+            auth:   { user: SMTP_USER, pass: SMTP_PASS },
+            tls:    { rejectUnauthorized: false },
+            connectionTimeout: 15000,
+            greetingTimeout:   10000,
+            socketTimeout:     20000,
         });
+
         await transporter.sendMail({
-            from: `"Учёт времени" <${SMTP_USER}>`,
-            to: REPORT_EMAIL,
-            subject: `📊 ${title}`,
-            text: `Автоматический отчёт от бота учёта рабочего времени.\nПериод: ${title}`,
+            from:        `"Учёт времени" <${SMTP_USER}>`,
+            to:          REPORT_EMAIL,
+            subject:     `📊 ${title}`,
+            text:        `Автоматический отчёт от бота учёта рабочего времени.\nПериод: ${title}`,
             attachments: [{ filename: `${title}.xlsx`, path: file }],
         });
+
         try { fs.unlinkSync(file); } catch(_) {}
         return { ok:true };
     } catch(err) {
@@ -576,8 +674,6 @@ async function getPortal(domain) {
     return rows[0] || null;
 }
 
-// ─── БД: посещаемость (запись) ───────────────────────────────────────────────
-
 async function saveAttendance(userId, userName, domain, type, lat, lon, inOffice) {
     const { rows } = await pool.query(
         `INSERT INTO attendance (user_id,user_name,domain,type,latitude,longitude,in_office)
@@ -586,8 +682,6 @@ async function saveAttendance(userId, userName, domain, type, lat, lon, inOffice
     );
     return rows[0].id;
 }
-
-// ─── БД: гео-токены ──────────────────────────────────────────────────────────
 
 async function saveGeoToken(token, userId, userName, dialogId, botId, domain, accessToken, type) {
     await pool.query(
@@ -652,46 +746,55 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
     return r;
 }
 
+// ИСПРАВЛЕНИЕ 3: отправить уведомление сотруднику в личный чат бота
+// dialogId для личного чата = 'U' + userId (в Битрикс24)
+async function notifyUser(domain, accessToken, botId, targetUserId, message) {
+    const dialogId = `U${targetUserId}`;
+    console.log(`📣 notifyUser → userId=${targetUserId}, dialog=${dialogId}`);
+    return sendMessage(domain, accessToken, botId, dialogId, message, null);
+}
+
 // ─── Регистрация команд ───────────────────────────────────────────────────────
 
 async function registerCommands(domain, accessToken, botId) {
     const handlerUrl = `https://${APP_DOMAIN}/imbot`;
     const cmds = [
-        // Пользовательские
-        { cmd:'arrived',       title:'Пришёл' },
-        { cmd:'left',          title:'Ушёл' },
-        { cmd:'status',        title:'Статус' },
-        { cmd:'help',          title:'Помощь' },
-        { cmd:'menu',          title:'Меню' },
-        // Вход/выход из режима администратора
-        { cmd:'admin_enter',   title:'Режим администратора' },
-        { cmd:'admin_logout',  title:'Выйти из админа' },
-        { cmd:'admin_back',    title:'Назад' },
-        { cmd:'cancel_input',  title:'Отмена' },
-        // Отчёты
-        { cmd:'report_today',  title:'Отчёт сегодня' },
-        { cmd:'report_week',   title:'Отчёт за неделю' },
-        { cmd:'report_month',  title:'Отчёт за месяц' },
-        { cmd:'who_in',        title:'Кто в офисе' },
-        // Email
-        { cmd:'send_report',   title:'Отчёт на почту' },
-        { cmd:'email_today',   title:'Email сегодня' },
-        { cmd:'email_week',    title:'Email неделя' },
-        { cmd:'email_month',   title:'Email месяц' },
-        // Расписание
-        { cmd:'schedule',      title:'Расписание' },
-        { cmd:'sched_vacation',title:'Отпуск' },
-        { cmd:'sched_sick',    title:'Больничный' },
-        { cmd:'sched_dayoff',  title:'Выходной' },
-        { cmd:'sched_remote',  title:'Удалённо' },
-        { cmd:'sched_business',title:'Командировка' },
-        { cmd:'sched_list',    title:'Список расписания' },
-        { cmd:'sched_delete',  title:'Удалить запись' },
-        // Управление администраторами
-        { cmd:'admin_manage',  title:'Управление' },
-        { cmd:'admin_add',     title:'Добавить админа' },
-        { cmd:'admin_remove',  title:'Удалить админа' },
-        { cmd:'admin_list',    title:'Список админов' },
+        { cmd:'arrived',          title:'Пришёл' },
+        { cmd:'left',             title:'Ушёл' },
+        { cmd:'status',           title:'Статус' },
+        { cmd:'help',             title:'Помощь' },
+        { cmd:'menu',             title:'Меню' },
+        { cmd:'admin_enter',      title:'Режим администратора' },
+        { cmd:'admin_logout',     title:'Выйти из админа' },
+        { cmd:'admin_back',       title:'Назад' },
+        { cmd:'cancel_input',     title:'Отмена' },
+        { cmd:'report_today',     title:'Отчёт сегодня' },
+        { cmd:'report_week',      title:'Отчёт за неделю' },
+        { cmd:'report_month',     title:'Отчёт за месяц' },
+        { cmd:'who_in',           title:'Кто в офисе' },
+        { cmd:'send_report',      title:'Отчёт на почту' },
+        { cmd:'email_today',      title:'Email сегодня' },
+        { cmd:'email_week',       title:'Email неделя' },
+        { cmd:'email_month',      title:'Email месяц' },
+        { cmd:'schedule',         title:'Расписание' },
+        { cmd:'sched_vacation',   title:'Отпуск' },
+        { cmd:'sched_sick',       title:'Больничный' },
+        { cmd:'sched_dayoff',     title:'Выходной' },
+        { cmd:'sched_remote',     title:'Удалённо' },
+        { cmd:'sched_business',   title:'Командировка' },
+        { cmd:'sched_list',       title:'Список расписания' },
+        { cmd:'sched_delete',     title:'Удалить запись' },
+        { cmd:'sched_search_again', title:'Искать снова' },
+        // Выбор сотрудника из результатов поиска (0–4)
+        { cmd:'select_user_0',    title:'Выбрать сотрудника 1' },
+        { cmd:'select_user_1',    title:'Выбрать сотрудника 2' },
+        { cmd:'select_user_2',    title:'Выбрать сотрудника 3' },
+        { cmd:'select_user_3',    title:'Выбрать сотрудника 4' },
+        { cmd:'select_user_4',    title:'Выбрать сотрудника 5' },
+        { cmd:'admin_manage',     title:'Управление' },
+        { cmd:'admin_add',        title:'Добавить админа' },
+        { cmd:'admin_remove',     title:'Удалить админа' },
+        { cmd:'admin_list',       title:'Список админов' },
     ];
     for (const c of cmds) {
         const r = await callBitrix(domain, accessToken, 'imbot.command.register', {
@@ -706,8 +809,6 @@ async function registerCommands(domain, accessToken, botId) {
         console.log(`📎 command.register [${c.cmd}]:`, r?.result ? '✅' : ('❌ ' + JSON.stringify(r)));
     }
 }
-
-// ─── Регистрация бота ─────────────────────────────────────────────────────────
 
 async function registerBot(domain, accessToken, existingBotId) {
     const handlerUrl = `https://${APP_DOMAIN}/imbot`;
@@ -851,7 +952,6 @@ app.post('/confirm-geo', async (req, res) => {
     }
 
     const typeLabel = rec.type === 'in' ? 'Приход' : 'Уход';
-    const emoji     = rec.type === 'in' ? '✅' : '🚪';
     const time      = new Date().toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' });
 
     await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, true);
@@ -928,44 +1028,82 @@ app.post('/imbot', async (req, res) => {
         const botId  = BOT_ID || portal?.bot_id;
         if (!botId) { console.error('❌ Нет bot_id:', domain); return; }
 
-        const userIsAdmin = await isAdmin(FROM_USER_ID);
+        // ИСПРАВЛЕНИЕ 2: подтягиваем имя из Битрикс24 API если имя неизвестно
+        let resolvedName = userName;
+        if (FROM_USER_ID && (!USER_NAME || USER_NAME.startsWith('Пользователь'))) {
+            const b24user = await getBitrixUser(domain, authToken, FROM_USER_ID);
+            if (b24user?.name) resolvedName = b24user.name;
+        }
 
-        // inAdminMode: true если пользователь нажал "Войти как администратор"
-        // Режим хранится в pending_input с action='admin_session'
+        // Регистрируем сотрудника в реестре при каждом взаимодействии
+        if (FROM_USER_ID && resolvedName) {
+            await registerEmployee(FROM_USER_ID, resolvedName, domain);
+        }
+
+        const userIsAdmin = await isAdmin(FROM_USER_ID);
         const pending     = await getPending(FROM_USER_ID);
         const inAdminMode = userIsAdmin && (pending?.action === 'admin_session');
-        // Главная клавиатура зависит от режима
         const kb = inAdminMode ? kbAdmin() : await mainKb(FROM_USER_ID);
 
         // ── Первое открытие чата ──────────────────────────────────────────────
         if (event === 'ONIMBOTJOINCHAT') {
             const marked = await hasMarkedToday(FROM_USER_ID);
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                buildGreeting(userName, firstName, inAdminMode, marked), kb);
+                buildGreeting(resolvedName, firstName, inAdminMode, marked), kb);
             return;
         }
 
         if (event !== 'ONIMBOTMESSAGEADD' && event !== 'ONIMCOMMANDADD') return;
 
-        // ── ОЖИДАНИЕ ВВОДА — многошаговые диалоги (только текстовые сообщения)─
+        // ── ОЖИДАНИЕ ВВОДА ────────────────────────────────────────────────────
         if (pending && pending.action !== 'admin_session' && action !== 'cancel_input'
             && event === 'ONIMBOTMESSAGEADD') {
             await handlePendingInput(domain, authToken, botId, DIALOG_ID,
-                FROM_USER_ID, userName, MESSAGE, pending);
+                FROM_USER_ID, resolvedName, MESSAGE, pending);
+            return;
+        }
+
+        // ── Обработка выбора сотрудника из списка ─────────────────────────────
+        if (action.startsWith('select_user_') && pending?.action === 'schedule_select_user') {
+            const idx   = parseInt(action.replace('select_user_', ''));
+            const users = pending.data.foundUsers || [];
+            const sel   = users[idx];
+            if (!sel) {
+                await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Сотрудник не найден.`, kbCancel());
+                return;
+            }
+            // Переходим к следующему шагу — ввод даты начала
+            await setPending(FROM_USER_ID, 'schedule_add', 'date_from', {
+                ...pending.data,
+                userId:   sel.id,
+                userName: sel.name,
+                adminSession: true,
+            });
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `👤 Сотрудник: *${sel.name}*\n\n📅 Введи дату *начала* в формате *ДД.ММ.ГГГГ*:`,
+                kbCancel());
+            return;
+        }
+
+        // ── Повторный поиск сотрудника ────────────────────────────────────────
+        if (action === 'sched_search_again' && pending?.data?.status) {
+            await setPending(FROM_USER_ID, 'schedule_add', 'search_user', {
+                status: pending.data.status, adminSession: true
+            });
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `🔍 Введи имя или фамилию сотрудника для поиска:`, kbCancel());
             return;
         }
 
         // ── ОТМЕНА ────────────────────────────────────────────────────────────
         if (action === 'cancel_input') {
             await clearPending(FROM_USER_ID);
-            // Восстанавливаем admin_session если был
             if (inAdminMode) await setPending(FROM_USER_ID, 'admin_session', 'active');
-            await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `❌ Действие отменено.`, kb);
+            await sendMessage(domain, authToken, botId, DIALOG_ID, `❌ Действие отменено.`, kb);
             return;
         }
 
-        // ── ВОЙТИ В РЕЖИМ АДМИНИСТРАТОРА (кнопка) ────────────────────────────
+        // ── ВОЙТИ В РЕЖИМ АДМИНИСТРАТОРА ──────────────────────────────────────
         if (action === 'admin_enter') {
             if (!userIsAdmin) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 У вас нет прав администратора.`, kb);
@@ -973,7 +1111,7 @@ app.post('/imbot', async (req, res) => {
             }
             await setPending(FROM_USER_ID, 'admin_session', 'active');
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                buildGreeting(userName, firstName, true, false), kbAdmin());
+                buildGreeting(resolvedName, firstName, true, false), kbAdmin());
             return;
         }
 
@@ -983,7 +1121,7 @@ app.post('/imbot', async (req, res) => {
             const marked = await hasMarkedToday(FROM_USER_ID);
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `✅ Вы вышли из режима администратора.\n\n` +
-                buildGreeting(userName, firstName, false, marked),
+                buildGreeting(resolvedName, firstName, false, marked),
                 await mainKb(FROM_USER_ID));
             return;
         }
@@ -996,7 +1134,6 @@ app.post('/imbot', async (req, res) => {
                     `⚠️ Уже есть активная отметка прихода!\nСначала нажми *"🚪 Ушёл"*, чтобы закрыть прошлую смену.`, kb);
                 return;
             }
-            // Предупреждение если сегодня по расписанию выходной/отпуск/больничный
             const sched = await getActiveSchedule(FROM_USER_ID);
             if (sched && ['vacation','sick','dayoff'].includes(sched.status)) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
@@ -1004,7 +1141,7 @@ app.post('/imbot', async (req, res) => {
                     `Если всё верно — ссылка для отметки ниже 👇`, null);
             }
             const token = makeToken();
-            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'in');
+            await saveGeoToken(token, FROM_USER_ID, resolvedName, DIALOG_ID, botId, domain, authToken, 'in');
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `📍 Отлично! Нажми кнопку ниже, чтобы подтвердить приход.\n\n` +
                 `⏰ *Ссылка действует всего 10 минут — не затягивай!* ⚡️`,
@@ -1019,7 +1156,7 @@ app.post('/imbot', async (req, res) => {
                 return;
             }
             const token = makeToken();
-            await saveGeoToken(token, FROM_USER_ID, userName, DIALOG_ID, botId, domain, authToken, 'out');
+            await saveGeoToken(token, FROM_USER_ID, resolvedName, DIALOG_ID, botId, domain, authToken, 'out');
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `📍 Уже уходишь? Нажми кнопку ниже, чтобы подтвердить уход.\n\n` +
                 `⏰ *Ссылка действует всего 10 минут — не закрывай бот!* ⚡️`,
@@ -1074,63 +1211,86 @@ app.post('/imbot', async (req, res) => {
             await sendMessage(domain, authToken, botId, DIALOG_ID, `👇 Выбери нужное действие:`, kb);
 
         // ════════════════════════════════════════════════════════════════════
-        //  АДМИН-ФУНКЦИИ (доступны только в режиме администратора)
+        //  АДМИН-ФУНКЦИИ
         // ════════════════════════════════════════════════════════════════════
 
-        // ── ОТЧЁТ СЕГОДНЯ ─────────────────────────────────────────────────────
         } else if (action === 'report_today') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const today = todaySV();
-            const { rows } = await pool.query(`
+            // Явились сегодня
+            const { rows: present } = await pool.query(`
                 SELECT user_name, user_id,
                     MIN(CASE WHEN type='in'  THEN timestamp END) as in_time,
                     MAX(CASE WHEN type='out' THEN timestamp END) as out_time
                 FROM attendance
                 WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1::date
                 GROUP BY user_id, user_name ORDER BY user_name`, [today]);
+            // Все зарегистрированные сотрудники
+            const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
+            // Кто не явился (нет в present и нет в расписании на сегодня)
+            const schedToday   = await getSchedulesToday();
+            const schedUserIds = new Set(schedToday.map(r => r.user_id));
+            const presentIds   = new Set(present.map(r => r.user_id));
+            const absent       = allEmps.filter(e => !presentIds.has(e.user_id) && !schedUserIds.has(e.user_id));
+
             let text = `📋 *Отчёт за ${new Date().toLocaleDateString('ru-RU')}*\n\n`;
-            if (rows.length) {
-                text += `👥 Явились сегодня (${rows.length} чел.):\n`;
-                rows.forEach(r => {
+            if (present.length) {
+                text += `✅ *Явились (${present.length} чел.):*\n`;
+                present.forEach(r => {
                     const i = r.in_time  ? tzTime(r.in_time)  : '?';
                     const o = r.out_time ? tzTime(r.out_time) : '🟢 в офисе';
                     text += `• ${r.user_name || r.user_id}: ${i} → ${o}\n`;
                 });
-            } else { text += `Сегодня отметок нет.`; }
-            const schedToday = await getSchedulesToday();
+            } else { text += `Сегодня отметок нет.\n`; }
             if (schedToday.length) {
                 text += `\n📅 *По расписанию:*\n`;
                 schedToday.forEach(r => { text += `• ${r.user_name}: ${SCHED_LABELS[r.status] || r.status}\n`; });
             }
+            if (absent.length) {
+                text += `\n❌ *Не отметились (${absent.length} чел.):*\n`;
+                absent.forEach(r => { text += `• ${r.user_name}\n`; });
+            }
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
-        // ── ОТЧЁТ ЗА НЕДЕЛЮ ───────────────────────────────────────────────────
         } else if (action === 'report_week') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            // Все сотрудники LEFT JOIN с посещаемостью за неделю
             const { rows } = await pool.query(`
-                SELECT user_name, user_id,
-                    COUNT(DISTINCT (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
-                FROM attendance WHERE type='in' AND timestamp >= NOW()-INTERVAL '7 days'
-                GROUP BY user_id, user_name ORDER BY user_name`);
+                SELECT e.user_name, e.user_id,
+                    COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
+                FROM employees e
+                LEFT JOIN attendance a ON a.user_id = e.user_id
+                    AND a.type = 'in'
+                    AND a.timestamp >= NOW()-INTERVAL '7 days'
+                GROUP BY e.user_id, e.user_name ORDER BY days DESC, e.user_name`);
             let text = `📅 *Отчёт за 7 дней*\n\n`;
-            if (rows.length) rows.forEach(r => { text += `• ${r.user_name || r.user_id}: ${r.days} раб. дн.\n`; });
-            else text += `Нет данных за этот период.`;
+            if (rows.length) rows.forEach(r => {
+                const d = Number(r.days);
+                const mark = d === 0 ? '❌' : d < 3 ? '⚠️' : '✅';
+                text += `${mark} ${r.user_name}: ${d} раб. дн.\n`;
+            });
+            else text += `Нет зарегистрированных сотрудников.`;
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
-        // ── ОТЧЁТ ЗА МЕСЯЦ ────────────────────────────────────────────────────
         } else if (action === 'report_month') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const { rows } = await pool.query(`
-                SELECT user_name, user_id,
-                    COUNT(DISTINCT (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
-                FROM attendance WHERE type='in' AND timestamp >= NOW()-INTERVAL '30 days'
-                GROUP BY user_id, user_name ORDER BY days DESC`);
+                SELECT e.user_name, e.user_id,
+                    COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
+                FROM employees e
+                LEFT JOIN attendance a ON a.user_id = e.user_id
+                    AND a.type = 'in'
+                    AND a.timestamp >= NOW()-INTERVAL '30 days'
+                GROUP BY e.user_id, e.user_name ORDER BY days DESC, e.user_name`);
             let text = `📆 *Отчёт за 30 дней*\n\n`;
-            if (rows.length) rows.forEach(r => { text += `• ${r.user_name || r.user_id}: ${r.days} раб. дн.\n`; });
-            else text += `Нет данных за этот период.`;
+            if (rows.length) rows.forEach(r => {
+                const d = Number(r.days);
+                const mark = d === 0 ? '❌' : d < 10 ? '⚠️' : '✅';
+                text += `${mark} ${r.user_name}: ${d} раб. дн.\n`;
+            });
+            else text += `Нет зарегистрированных сотрудников.`;
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
-        // ── КТО В ОФИСЕ ───────────────────────────────────────────────────────
         } else if (action === 'who_in') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const { rows } = await pool.query(`
@@ -1150,7 +1310,6 @@ app.post('/imbot', async (req, res) => {
             } else { text += `Сейчас никого нет в офисе.`; }
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
-        // ── ОТЧЁТ НА ПОЧТУ ────────────────────────────────────────────────────
         } else if (action === 'send_report') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await sendMessage(domain, authToken, botId, DIALOG_ID,
@@ -1168,7 +1327,9 @@ app.post('/imbot', async (req, res) => {
                     `✅ *Отчёт успешно отправлен!*\n📧 ${REPORT_EMAIL}`, kbAdmin());
             } else {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `❌ Не удалось отправить отчёт.\n\n_${result.error}_`, kbAdmin());
+                    `❌ Не удалось отправить отчёт.\n\n_${result.error}_\n\n` +
+                    `💡 Проверь переменные SMTP_HOST, SMTP_PORT (587), SMTP_USER, SMTP_PASS на Render.`,
+                    kbAdmin());
             }
 
         // ── РАСПИСАНИЕ ────────────────────────────────────────────────────────
@@ -1185,10 +1346,11 @@ app.post('/imbot', async (req, res) => {
                 sched_remote:'remote', sched_business:'business'
             };
             const status = statusMap[action];
-            await setPending(FROM_USER_ID, 'schedule_add', 'user_name', { status, adminSession:true });
+            // ИСПРАВЛЕНИЕ 5: поиск сотрудника через API вместо ввода просто имени
+            await setPending(FROM_USER_ID, 'schedule_add', 'search_user', { status, adminSession:true });
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `${SCHED_LABELS[status]} — *добавление записи*\n\n` +
-                `👤 Введи имя сотрудника:`, kbCancel());
+                `🔍 Введи имя или фамилию сотрудника для поиска:`, kbCancel());
 
         } else if (action === 'sched_list') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
@@ -1227,9 +1389,7 @@ app.post('/imbot', async (req, res) => {
             text += `👑 ID ${MANAGER_ID} — главный администратор\n`;
             if (admins.length) {
                 admins.forEach(a => { text += `• ${a.user_name || 'Без имени'} (ID: ${a.user_id})\n`; });
-            } else {
-                text += `\nДополнительных администраторов нет.`;
-            }
+            } else { text += `\nДополнительных администраторов нет.`; }
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdminManage());
 
         } else if (action === 'admin_add') {
@@ -1264,7 +1424,7 @@ app.post('/imbot', async (req, res) => {
             if (greetings.some(g => msgCmd.includes(g) || cleanMsg.includes(g))) {
                 const marked = await hasMarkedToday(FROM_USER_ID);
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    buildGreeting(userName, firstName, inAdminMode, marked), kb);
+                    buildGreeting(resolvedName, firstName, inAdminMode, marked), kb);
             } else {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
                     `❓ Не понимаю «${MESSAGE || COMMAND}».\nВоспользуйся кнопками ниже 👇`, kb);
@@ -1284,7 +1444,6 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
     const { action, step, data } = pending;
     const val = message.trim();
 
-    // После завершения шага — восстанавливаем admin_session если нужно
     async function done(text, kb) {
         await clearPending(userId);
         if (data.adminSession) await setPending(userId, 'admin_session', 'active');
@@ -1299,9 +1458,12 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
                 `⚠️ Введи числовой ID (только цифры), например: *123*`, kbCancel());
             return;
         }
-        await addAdmin(newId, `Пользователь ${newId}`);
+        // Подтягиваем имя нового админа из Битрикс24
+        const b24user = await getBitrixUser(domain, authToken, newId);
+        const newName = b24user?.name || `Пользователь ${newId}`;
+        await addAdmin(newId, newName);
         await done(
-            `✅ *Пользователь ID ${newId} теперь администратор!*\n\n` +
+            `✅ *${newName} (ID ${newId}) теперь администратор!*\n\n` +
             `Ему стала доступна кнопка *"🔐 Режим администратора"*.`,
             kbAdminManage());
         return;
@@ -1315,7 +1477,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
                 `⚠️ Введи числовой ID пользователя:`, kbCancel());
             return;
         }
-        if (String(remId) === String(process.env.MANAGER_USER_ID || '1')) {
+        if (String(remId) === String(MANAGER_ID)) {
             await done(`🚫 Нельзя удалить главного администратора!`, kbAdminManage());
             return;
         }
@@ -1324,15 +1486,46 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         return;
     }
 
-    // ── Добавить расписание: шаг 1 — имя сотрудника ──────────────────────────
-    if (action === 'schedule_add' && step === 'user_name') {
-        await setPending(userId, 'schedule_add', 'date_from', { ...data, userName: val });
+    // ── ИСПРАВЛЕНИЕ 5: поиск сотрудника по имени через Битрикс24 API ─────────
+    if (action === 'schedule_add' && step === 'search_user') {
         await sendMessage(domain, authToken, botId, dialogId,
-            `👤 Сотрудник: *${val}*\n\n📅 Введи дату *начала* в формате *ДД.ММ.ГГГГ*:`, kbCancel());
+            `🔍 Ищу сотрудника *"${val}"*...`, null);
+
+        const users = await searchBitrixUsers(domain, authToken, val);
+
+        if (!users.length) {
+            await sendMessage(domain, authToken, botId, dialogId,
+                `❌ Сотрудник *"${val}"* не найден в Битрикс24.\n\nПопробуй другое имя:`,
+                kbCancel());
+            return;
+        }
+
+        if (users.length === 1) {
+            // Единственный результат — сразу переходим к дате
+            await setPending(userId, 'schedule_add', 'date_from', {
+                ...data,
+                userId:   users[0].id,
+                userName: users[0].name,
+            });
+            await sendMessage(domain, authToken, botId, dialogId,
+                `👤 Найден сотрудник: *${users[0].name}*\n\n📅 Введи дату *начала* в формате *ДД.ММ.ГГГГ*:`,
+                kbCancel());
+            return;
+        }
+
+        // Несколько вариантов — показываем кнопки выбора
+        await setPending(userId, 'schedule_select_user', 'pick', {
+            ...data,
+            foundUsers: users,
+        });
+        const names = users.slice(0, 5).map((u, i) => `${i+1}. ${u.name}`).join('\n');
+        await sendMessage(domain, authToken, botId, dialogId,
+            `🔍 Найдено несколько сотрудников — выбери нужного:\n\n${names}`,
+            kbUserSelect(users));
         return;
     }
 
-    // ── Добавить расписание: шаг 2 — дата начала ─────────────────────────────
+    // ── Добавить расписание: шаг — дата начала ────────────────────────────────
     if (action === 'schedule_add' && step === 'date_from') {
         const d = parseDate(val);
         if (!d) {
@@ -1346,7 +1539,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         return;
     }
 
-    // ── Добавить расписание: шаг 3 — дата окончания ──────────────────────────
+    // ── Добавить расписание: шаг — дата окончания ─────────────────────────────
     if (action === 'schedule_add' && step === 'date_to') {
         const d = parseDate(val);
         if (!d) {
@@ -1360,23 +1553,44 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         return;
     }
 
-    // ── Добавить расписание: шаг 4 — комментарий + сохранение ────────────────
+    // ── Добавить расписание: сохранение + ИСПРАВЛЕНИЕ 4: уведомление ──────────
     if (action === 'schedule_add' && step === 'comment') {
         const comment = (val === '-' || val === '—') ? null : val;
+
         await pool.query(
             `INSERT INTO schedules (user_id,user_name,status,date_from,date_to,comment,created_by)
              VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-            [`user_${data.userName}`, data.userName, data.status, data.dateFrom, data.dateTo, comment, userId]
+            [data.userId, data.userName, data.status, data.dateFrom, data.dateTo, comment, userId]
         );
+
         const from = new Date(data.dateFrom).toLocaleDateString('ru-RU');
         const to   = new Date(data.dateTo).toLocaleDateString('ru-RU');
+        const label = SCHED_LABELS[data.status];
+
         await done(
             `✅ *Запись добавлена в расписание!*\n\n` +
             `👤 ${data.userName}\n` +
-            `📋 ${SCHED_LABELS[data.status]}\n` +
+            `📋 ${label}\n` +
             `📅 ${from} — ${to}` +
             (comment ? `\n💬 ${comment}` : ''),
             kbSchedule());
+
+        // ИСПРАВЛЕНИЕ 4: отправить уведомление сотруднику
+        // data.userId — реальный Битрикс24 ID (из поиска API)
+        if (data.userId && !data.userId.startsWith('user_')) {
+            const portal = await getPortal(domain);
+            const bId    = portal?.bot_id;
+            if (bId) {
+                const notifyText =
+                    `📅 *Вам назначено расписание*\n\n` +
+                    `${label}\n` +
+                    `📅 ${from} — ${to}` +
+                    (comment ? `\n💬 ${comment}` : '') +
+                    `\n\n_Информация внесена администратором._`;
+                await notifyUser(domain, authToken, bId, data.userId, notifyText);
+                console.log(`📣 Уведомление отправлено сотруднику ID=${data.userId}`);
+            }
+        }
         return;
     }
 
@@ -1410,7 +1624,8 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
 app.get('/', (req, res) => {
     res.send(`<h1>🤖 Бот учёта рабочего времени</h1><ul>
     <li><a href="/status">Статус</a></li>
-    <li><a href="/debug">Debug (список админов)</a></li>
+    <li><a href="/debug">Debug</a></li>
+    <li><a href="/sync-employees">🔄 Синхронизировать сотрудников из Битрикс24</a></li>
     <li><a href="/register-commands">Зарегистрировать команды</a></li>
     <li><a href="/reinstall-bot">Перерегистрировать бота</a></li>
     <li><a href="/test-bot">Тест бота</a></li></ul>`);
@@ -1418,10 +1633,10 @@ app.get('/', (req, res) => {
 
 app.get('/status', async (req, res) => {
     const { rows } = await pool.query(`SELECT domain, bot_id, updated_at FROM portals`);
-    res.json({ ok:true, service:'v11-full', portals:rows, time:new Date().toISOString(),
+    res.json({ ok:true, service:'v13-employees', portals:rows, time:new Date().toISOString(),
         env:{ app_domain:APP_DOMAIN, office:`${OFFICE_LAT},${OFFICE_LON}`,
               radius:OFFICE_RADIUS, manager:MANAGER_ID, report_email:REPORT_EMAIL,
-              smtp_ready: !!(SMTP_USER && SMTP_PASS) } });
+              smtp_ready: !!(SMTP_USER && SMTP_PASS), smtp_port: SMTP_PORT } });
 });
 
 app.get('/debug', async (req, res) => {
@@ -1459,8 +1674,8 @@ app.get('/reinstall-bot', async (req, res) => {
             return res.json({ ok:false, log, error:'Нет refresh_token.' });
         }
     }
-    const fresh = await getPortal(domain);
-    const botId = await registerBot(domain, fresh.access_token, fresh.bot_id || null);
+    const fresh  = await getPortal(domain);
+    const botId  = await registerBot(domain, fresh.access_token, fresh.bot_id || null);
     if (botId) {
         await savePortal(domain, fresh.access_token, fresh.refresh_token, botId, fresh.client_endpoint);
         log.push({ bot:`✅ ID=${botId}` });
@@ -1474,21 +1689,33 @@ app.get('/test-bot', async (req, res) => {
     if (!portal) return res.json({ ok:false, error:'Портал не найден.' });
     const profile = await callBitrix(domain, portal.access_token, 'profile', {});
     const bots    = await callBitrix(domain, portal.access_token, 'imbot.bot.list', {});
-    const { rows: admins } = await pool.query(`SELECT user_id, user_name FROM admins`);
+    const { rows: admins }    = await pool.query(`SELECT user_id, user_name FROM admins`);
+    const { rows: employees } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
     res.json({
-        bot_id:         portal.bot_id,
-        profile_check:  profile?.result ? `✅ ${profile.result.NAME} ${profile.result.LAST_NAME}` : '❌',
-        bots_in_b24:    bots?.result || null,
-        admins_in_db:   admins,
-        smtp_ready:     !!(SMTP_USER && SMTP_PASS),
-        report_email:   REPORT_EMAIL,
+        bot_id:        portal.bot_id,
+        profile_check: profile?.result ? `✅ ${profile.result.NAME} ${profile.result.LAST_NAME}` : '❌',
+        bots_in_b24:   bots?.result || null,
+        admins_in_db:  admins,
+        employees_in_db: employees,
+        smtp_ready:    !!(SMTP_USER && SMTP_PASS),
+        smtp_port:     SMTP_PORT,
+        report_email:  REPORT_EMAIL,
     });
 });
 
-// ─── Очистка старых токенов и зависших pending ────────────────────────────────
+// Принудительная синхронизация всех сотрудников из Битрикс24
+app.get('/sync-employees', async (req, res) => {
+    const domain = req.query.domain || BITRIX_DOMAIN;
+    const portal = await getPortal(domain);
+    if (!portal) return res.json({ ok:false, error:'Портал не найден.' });
+    const count = await syncAllEmployees(domain, portal.access_token);
+    const { rows } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
+    res.json({ ok:true, synced: count, employees: rows });
+});
+
+// ─── Очистка ──────────────────────────────────────────────────────────────────
 cron.schedule('*/15 * * * *', async () => {
     await pool.query(`DELETE FROM geo_tokens WHERE created_at < NOW()-INTERVAL '15 minutes'`);
-    // Зависшие ожидания ввода чистим через 30 минут, кроме admin_session
     await pool.query(`DELETE FROM pending_input WHERE action != 'admin_session' AND created_at < NOW()-INTERVAL '30 minutes'`);
     console.log('🧹 Очистка токенов и pending');
 });
@@ -1499,8 +1726,8 @@ initDB().then(() => {
         console.log(`🚀 Сервер: https://${APP_DOMAIN}`);
         console.log(`📍 Офис: ${OFFICE_LAT}, ${OFFICE_LON} (${OFFICE_RADIUS}м)`);
         console.log(`🆔 Менеджер: ${MANAGER_ID}`);
-        console.log(`📧 Email для отчётов: ${REPORT_EMAIL}`);
-        console.log(`📨 SMTP: ${SMTP_USER ? '✅ настроен' : '❌ задай SMTP_USER и SMTP_PASS в Render'}`);
+        console.log(`📧 Email: ${REPORT_EMAIL}`);
+        console.log(`📨 SMTP: ${SMTP_USER ? `✅ ${SMTP_HOST}:${SMTP_PORT}` : '❌ не настроен'}`);
         console.log('=== ✅ READY ===');
     });
 }).catch(err => {
