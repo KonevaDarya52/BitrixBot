@@ -22,11 +22,11 @@ const OFFICE_RADIUS = parseInt(process.env.OFFICE_RADIUS   || '100');
 const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
 
 const REPORT_EMAIL = process.env.REPORT_EMAIL || 'koneva_dashenka06@vk.com';
-// ИСПРАВЛЕНИЕ 1: используем порт 587 + STARTTLS вместо 465+SSL (465 заблокирован на Render)
-const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+
+const SMTP_HOST = process.env.SMTP_HOST || 'smtp.mail.ru';
 const SMTP_PORT = parseInt(process.env.SMTP_PORT || '587');
-const SMTP_USER = process.env.SMTP_USER || '';
-const SMTP_PASS = process.env.SMTP_PASS || '';
+const SMTP_USER = process.env.SMTP_USER || 'koneva_dashenka06@vk.com';
+const SMTP_PASS = process.env.SMTP_PASS || '83lo xagi noto hima';
 
 // ─── PostgreSQL ───────────────────────────────────────────────────────────────
 const pool = new Pool({
@@ -74,7 +74,6 @@ async function initDB() {
         data JSONB DEFAULT '{}',
         created_at TIMESTAMPTZ DEFAULT NOW())`);
 
-    // Реестр сотрудников — все известные боту пользователи Битрикс24
     await pool.query(`CREATE TABLE IF NOT EXISTS employees (
         user_id TEXT PRIMARY KEY,
         user_name TEXT NOT NULL,
@@ -92,9 +91,6 @@ app.use((req, res, next) => {
     next();
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  УТИЛИТЫ
-// ═════════════════════════════════════════════════════════════════════════════
 
 function getDistance(lat1, lon1, lat2, lon2) {
     const R = 6371000;
@@ -141,7 +137,6 @@ const SCHED_LABELS = {
     business: '✈️ Командировка',
 };
 
-// ─── Администраторы ───────────────────────────────────────────────────────────
 
 async function isAdmin(userId) {
     if (String(userId) === String(MANAGER_ID)) return true;
@@ -168,7 +163,6 @@ async function listAdmins() {
     return rows;
 }
 
-// ─── Ожидание ввода ───────────────────────────────────────────────────────────
 
 async function setPending(userId, action, step, data = {}) {
     await pool.query(
@@ -188,7 +182,6 @@ async function clearPending(userId) {
     await pool.query(`DELETE FROM pending_input WHERE user_id=$1`, [String(userId)]);
 }
 
-// ─── Посещаемость ─────────────────────────────────────────────────────────────
 
 async function getLastMark(userId) {
     const { rows } = await pool.query(
@@ -217,8 +210,6 @@ async function getTodayMarks(userId) {
     return rows;
 }
 
-// ─── Расписание ───────────────────────────────────────────────────────────────
-
 async function getActiveSchedule(userId) {
     const today = todaySV();
     const { rows } = await pool.query(
@@ -234,15 +225,6 @@ async function getSchedulesToday() {
     return rows;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  ИСПРАВЛЕНИЕ 2: поиск сотрудников через Bitrix24 API
-// ═════════════════════════════════════════════════════════════════════════════
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  РЕЕСТР СОТРУДНИКОВ
-// ═════════════════════════════════════════════════════════════════════════════
-
-// Регистрирует/обновляет сотрудника в реестре. Вызывается при любом взаимодействии.
 async function registerEmployee(userId, userName, domain) {
     if (!userId || !userName) return;
     await pool.query(
@@ -255,7 +237,6 @@ async function registerEmployee(userId, userName, domain) {
     );
 }
 
-// Подтягивает всех активных пользователей из Битрикс24 и регистрирует их
 async function syncAllEmployees(domain, accessToken) {
     try {
         let start = 0, total = 0;
@@ -281,7 +262,6 @@ async function syncAllEmployees(domain, accessToken) {
 }
 
 async function searchBitrixUsers(domain, accessToken, query) {
-    // Поиск по имени/фамилии через user.search
     const resp = await callBitrix(domain, accessToken, 'user.search', {
         NAME: query,
         ACTIVE: true,
@@ -290,7 +270,6 @@ async function searchBitrixUsers(domain, accessToken, query) {
     if (resp?.result && Array.isArray(resp.result)) {
         users = resp.result;
     }
-    // Если ничего не нашли по имени, пробуем по фамилии
     if (!users.length) {
         const resp2 = await callBitrix(domain, accessToken, 'user.search', {
             LAST_NAME: query,
@@ -319,10 +298,6 @@ async function getBitrixUser(domain, accessToken, userId) {
     return null;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  ПРИВЕТСТВИЕ
-// ═════════════════════════════════════════════════════════════════════════════
-
 function buildGreeting(userName, firstName, adminMode, alreadyMarked) {
     const hour = parseInt(new Date().toLocaleString('ru-RU', { hour:'numeric', hour12:false, timeZone:'Asia/Yekaterinburg' }));
     let timeEmoji, timeGreeting;
@@ -342,7 +317,7 @@ function buildGreeting(userName, firstName, adminMode, alreadyMarked) {
             `• 👥 Кто в офисе — онлайн-список\n` +
             `• 🗓 Расписание — отпуска, больничные, выходные\n` +
             `• 👤 Управление — добавить/удалить администратора\n` +
-            `• 📤 Отчёт на почту — Excel на ${REPORT_EMAIL}\n\n` +
+            `• 📤 Отчёт на почту — Excel на почту\n\n` +
             `⬇️ Выбирай действие:`
         );
     }
@@ -367,10 +342,6 @@ function buildGreeting(userName, firstName, adminMode, alreadyMarked) {
         `⬇️ Выбирай нужное действие:`
     );
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  КЛАВИАТУРЫ
-// ═════════════════════════════════════════════════════════════════════════════
 
 function kbMain() {
     return [
@@ -464,7 +435,6 @@ function kbCancel() {
     ];
 }
 
-// Кнопки подтверждения найденного сотрудника (до 5 вариантов)
 function kbUserSelect(users) {
     const btns = [];
     users.slice(0, 5).forEach((u, i) => {
@@ -487,10 +457,6 @@ function kbUserSelect(users) {
 async function mainKb(userId) {
     return (await isAdmin(userId)) ? kbMainAdmin() : kbMain();
 }
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  ИСПРАВЛЕНИЕ 1: EXCEL / EMAIL — порт 587 + STARTTLS
-// ═════════════════════════════════════════════════════════════════════════════
 
 async function buildExcelReport(period) {
     const workbook = new ExcelJS.Workbook();
@@ -575,7 +541,6 @@ async function buildExcelReport(period) {
         row.height = 20;
     });
 
-    // Лист расписания
     const schedRows = await pool.query(
         `SELECT * FROM schedules WHERE date_to >= $1 ORDER BY date_from, user_name`, [today]);
     if (schedRows.rows.length) {
@@ -625,11 +590,10 @@ async function sendReportByEmail(period) {
     try {
         const { file, title } = await buildExcelReport(period);
 
-        // ИСПРАВЛЕНИЕ: порт 587 + STARTTLS (порт 465 заблокирован на Render)
         const transporter = nodemailer.createTransport({
             host:   SMTP_HOST,
             port:   SMTP_PORT,
-            secure: SMTP_PORT === 465,   // false для 587
+            secure: SMTP_PORT === 587,
             auth:   { user: SMTP_USER, pass: SMTP_PASS },
             tls:    { rejectUnauthorized: false },
             connectionTimeout: 15000,
@@ -652,8 +616,6 @@ async function sendReportByEmail(period) {
         return { ok:false, error: err.message };
     }
 }
-
-// ─── БД: порталы ─────────────────────────────────────────────────────────────
 
 async function savePortal(domain, accessToken, refreshToken, botId, clientEndpoint) {
     await pool.query(
@@ -701,8 +663,6 @@ async function popGeoToken(token) {
     return rows[0] || null;
 }
 
-// ─── Bitrix24 API ─────────────────────────────────────────────────────────────
-
 async function doRefreshToken(domain, rToken) {
     try {
         const resp = await axios.get('https://oauth.bitrix24.tech/oauth/token/', {
@@ -745,16 +705,11 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
     if (r && r.result === false) console.error('❌ imbot.message.add failed:', JSON.stringify(r));
     return r;
 }
-
-// ИСПРАВЛЕНИЕ 3: отправить уведомление сотруднику в личный чат бота
-// dialogId для личного чата = 'U' + userId (в Битрикс24)
 async function notifyUser(domain, accessToken, botId, targetUserId, message) {
     const dialogId = `U${targetUserId}`;
     console.log(`📣 notifyUser → userId=${targetUserId}, dialog=${dialogId}`);
     return sendMessage(domain, accessToken, botId, dialogId, message, null);
 }
-
-// ─── Регистрация команд ───────────────────────────────────────────────────────
 
 async function registerCommands(domain, accessToken, botId) {
     const handlerUrl = `https://${APP_DOMAIN}/imbot`;
@@ -785,7 +740,6 @@ async function registerCommands(domain, accessToken, botId) {
         { cmd:'sched_list',       title:'Список расписания' },
         { cmd:'sched_delete',     title:'Удалить запись' },
         { cmd:'sched_search_again', title:'Искать снова' },
-        // Выбор сотрудника из результатов поиска (0–4)
         { cmd:'select_user_0',    title:'Выбрать сотрудника 1' },
         { cmd:'select_user_1',    title:'Выбрать сотрудника 2' },
         { cmd:'select_user_2',    title:'Выбрать сотрудника 3' },
@@ -837,10 +791,6 @@ async function registerBot(domain, accessToken, existingBotId) {
     return botId;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  УСТАНОВКА
-// ═════════════════════════════════════════════════════════════════════════════
-
 app.post('/install', async (req, res) => {
     console.log('📥 POST /install body:', JSON.stringify(req.body));
     const AUTH_ID         = req.body.AUTH_ID    || req.body.auth_id    || '';
@@ -876,10 +826,6 @@ h1{color:#2e7d32;margin-bottom:16px}p{color:#555;line-height:1.6}</style></head>
 <p>Найдите бота в списке чатов Битрикс24.<br>Бот управляется кнопками.</p></div>
 <script>BX24.init(function(){BX24.installFinish();});</script></body></html>`);
 });
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  СТРАНИЦА ГЕОЛОКАЦИИ
-// ═════════════════════════════════════════════════════════════════════════════
 
 app.get('/geo', (req, res) => {
     const { token } = req.query;
@@ -926,10 +872,6 @@ else{navigator.geolocation.getCurrentPosition(
 </script></body></html>`);
 });
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  ПОДТВЕРЖДЕНИЕ ГЕОЛОКАЦИИ
-// ═════════════════════════════════════════════════════════════════════════════
-
 app.post('/confirm-geo', async (req, res) => {
     const { token, lat, lon } = req.body;
     if (!token || lat == null || lon == null)
@@ -975,10 +917,6 @@ app.post('/confirm-geo', async (req, res) => {
     console.log(`✅ ${rec.user_name} — ${typeLabel} в ${time}`);
     res.json({ ok:true, in_office:true });
 });
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  ВЕБХУК БОТА
-// ═════════════════════════════════════════════════════════════════════════════
 
 app.post('/imbot', async (req, res) => {
     res.json({ result:'ok' });
@@ -1028,14 +966,12 @@ app.post('/imbot', async (req, res) => {
         const botId  = BOT_ID || portal?.bot_id;
         if (!botId) { console.error('❌ Нет bot_id:', domain); return; }
 
-        // ИСПРАВЛЕНИЕ 2: подтягиваем имя из Битрикс24 API если имя неизвестно
         let resolvedName = userName;
         if (FROM_USER_ID && (!USER_NAME || USER_NAME.startsWith('Пользователь'))) {
             const b24user = await getBitrixUser(domain, authToken, FROM_USER_ID);
             if (b24user?.name) resolvedName = b24user.name;
         }
 
-        // Регистрируем сотрудника в реестре при каждом взаимодействии
         if (FROM_USER_ID && resolvedName) {
             await registerEmployee(FROM_USER_ID, resolvedName, domain);
         }
@@ -1045,7 +981,6 @@ app.post('/imbot', async (req, res) => {
         const inAdminMode = userIsAdmin && (pending?.action === 'admin_session');
         const kb = inAdminMode ? kbAdmin() : await mainKb(FROM_USER_ID);
 
-        // ── Первое открытие чата ──────────────────────────────────────────────
         if (event === 'ONIMBOTJOINCHAT') {
             const marked = await hasMarkedToday(FROM_USER_ID);
             await sendMessage(domain, authToken, botId, DIALOG_ID,
@@ -1055,7 +990,6 @@ app.post('/imbot', async (req, res) => {
 
         if (event !== 'ONIMBOTMESSAGEADD' && event !== 'ONIMCOMMANDADD') return;
 
-        // ── ОЖИДАНИЕ ВВОДА ────────────────────────────────────────────────────
         if (pending && pending.action !== 'admin_session' && action !== 'cancel_input'
             && event === 'ONIMBOTMESSAGEADD') {
             await handlePendingInput(domain, authToken, botId, DIALOG_ID,
@@ -1063,7 +997,6 @@ app.post('/imbot', async (req, res) => {
             return;
         }
 
-        // ── Обработка выбора сотрудника из списка ─────────────────────────────
         if (action.startsWith('select_user_') && pending?.action === 'schedule_select_user') {
             const idx   = parseInt(action.replace('select_user_', ''));
             const users = pending.data.foundUsers || [];
@@ -1072,7 +1005,6 @@ app.post('/imbot', async (req, res) => {
                 await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Сотрудник не найден.`, kbCancel());
                 return;
             }
-            // Переходим к следующему шагу — ввод даты начала
             await setPending(FROM_USER_ID, 'schedule_add', 'date_from', {
                 ...pending.data,
                 userId:   sel.id,
@@ -1084,8 +1016,6 @@ app.post('/imbot', async (req, res) => {
                 kbCancel());
             return;
         }
-
-        // ── Повторный поиск сотрудника ────────────────────────────────────────
         if (action === 'sched_search_again' && pending?.data?.status) {
             await setPending(FROM_USER_ID, 'schedule_add', 'search_user', {
                 status: pending.data.status, adminSession: true
@@ -1095,15 +1025,12 @@ app.post('/imbot', async (req, res) => {
             return;
         }
 
-        // ── ОТМЕНА ────────────────────────────────────────────────────────────
         if (action === 'cancel_input') {
             await clearPending(FROM_USER_ID);
             if (inAdminMode) await setPending(FROM_USER_ID, 'admin_session', 'active');
             await sendMessage(domain, authToken, botId, DIALOG_ID, `❌ Действие отменено.`, kb);
             return;
         }
-
-        // ── ВОЙТИ В РЕЖИМ АДМИНИСТРАТОРА ──────────────────────────────────────
         if (action === 'admin_enter') {
             if (!userIsAdmin) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 У вас нет прав администратора.`, kb);
@@ -1114,8 +1041,6 @@ app.post('/imbot', async (req, res) => {
                 buildGreeting(resolvedName, firstName, true, false), kbAdmin());
             return;
         }
-
-        // ── ВЫЙТИ ИЗ РЕЖИМА АДМИНИСТРАТОРА ────────────────────────────────────
         if (action === 'admin_logout' || action === 'admin_back') {
             await clearPending(FROM_USER_ID);
             const marked = await hasMarkedToday(FROM_USER_ID);
@@ -1125,8 +1050,6 @@ app.post('/imbot', async (req, res) => {
                 await mainKb(FROM_USER_ID));
             return;
         }
-
-        // ── ПРИШЁЛ ───────────────────────────────────────────────────────────
         if (action === 'arrived' || action === 'пришел' || action === 'пришёл') {
             const lastMark = await getLastMark(FROM_USER_ID);
             if (lastMark && lastMark.type === 'in') {
@@ -1147,7 +1070,6 @@ app.post('/imbot', async (req, res) => {
                 `⏰ *Ссылка действует всего 10 минут — не затягивай!* ⚡️`,
                 kbGeo(`${geoUrl}?token=${token}`, 'in'));
 
-        // ── УШЁЛ ─────────────────────────────────────────────────────────────
         } else if (action === 'left' || action === 'ушел' || action === 'ушёл') {
             const lastMark = await getLastMark(FROM_USER_ID);
             if (!lastMark || lastMark.type !== 'in') {
@@ -1161,8 +1083,6 @@ app.post('/imbot', async (req, res) => {
                 `📍 Уже уходишь? Нажми кнопку ниже, чтобы подтвердить уход.\n\n` +
                 `⏰ *Ссылка действует всего 10 минут — не закрывай бот!* ⚡️`,
                 kbGeo(`${geoUrl}?token=${token}`, 'out'));
-
-        // ── СТАТУС ────────────────────────────────────────────────────────────
         } else if (action === 'status' || action === 'статус') {
             const marks = await getTodayMarks(FROM_USER_ID);
             if (!marks.length) {
@@ -1196,7 +1116,6 @@ app.post('/imbot', async (req, res) => {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `📊 *Твои отметки за сегодня:*\n\n${lines.join('\n')}${totalStr}`, kb);
 
-        // ── ПОМОЩЬ ────────────────────────────────────────────────────────────
         } else if (action === 'help' || action === 'помощь') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `🤖 *Бот учёта рабочего времени*\n\n` +
@@ -1205,19 +1124,12 @@ app.post('/imbot', async (req, res) => {
                 `📊 *Статус* — посмотреть свои отметки за сегодня\n\n` +
                 `После нажатия кнопки откроется страница для подтверждения геолокации.\n` +
                 `⏰ *Ссылка действует 10 минут!*`, kb);
-
-        // ── МЕНЮ ─────────────────────────────────────────────────────────────
         } else if (action === 'menu' || action === 'назад' || action === 'меню') {
             await sendMessage(domain, authToken, botId, DIALOG_ID, `👇 Выбери нужное действие:`, kb);
-
-        // ════════════════════════════════════════════════════════════════════
-        //  АДМИН-ФУНКЦИИ
-        // ════════════════════════════════════════════════════════════════════
 
         } else if (action === 'report_today') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const today = todaySV();
-            // Явились сегодня
             const { rows: present } = await pool.query(`
                 SELECT user_name, user_id,
                     MIN(CASE WHEN type='in'  THEN timestamp END) as in_time,
@@ -1225,9 +1137,7 @@ app.post('/imbot', async (req, res) => {
                 FROM attendance
                 WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1::date
                 GROUP BY user_id, user_name ORDER BY user_name`, [today]);
-            // Все зарегистрированные сотрудники
             const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
-            // Кто не явился (нет в present и нет в расписании на сегодня)
             const schedToday   = await getSchedulesToday();
             const schedUserIds = new Set(schedToday.map(r => r.user_id));
             const presentIds   = new Set(present.map(r => r.user_id));
@@ -1254,7 +1164,6 @@ app.post('/imbot', async (req, res) => {
 
         } else if (action === 'report_week') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-            // Все сотрудники LEFT JOIN с посещаемостью за неделю
             const { rows } = await pool.query(`
                 SELECT e.user_name, e.user_id,
                     COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
@@ -1331,8 +1240,6 @@ app.post('/imbot', async (req, res) => {
                     `💡 Проверь переменные SMTP_HOST, SMTP_PORT (587), SMTP_USER, SMTP_PASS на Render.`,
                     kbAdmin());
             }
-
-        // ── РАСПИСАНИЕ ────────────────────────────────────────────────────────
         } else if (action === 'schedule') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await sendMessage(domain, authToken, botId, DIALOG_ID,
@@ -1374,8 +1281,6 @@ app.post('/imbot', async (req, res) => {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `🗑 *Удаление записи расписания*\n\nВведи *ID записи* (цифру в [скобках] из списка):`,
                 kbCancel());
-
-        // ── УПРАВЛЕНИЕ АДМИНИСТРАТОРАМИ ────────────────────────────────────────
         } else if (action === 'admin_manage') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await sendMessage(domain, authToken, botId, DIALOG_ID,
@@ -1435,11 +1340,6 @@ app.post('/imbot', async (req, res) => {
         console.error('❌ /imbot error:', err.message, err.stack);
     }
 });
-
-// ═════════════════════════════════════════════════════════════════════════════
-//  МНОГОШАГОВЫЕ ДИАЛОГИ
-// ═════════════════════════════════════════════════════════════════════════════
-
 async function handlePendingInput(domain, authToken, botId, dialogId, userId, userName, message, pending) {
     const { action, step, data } = pending;
     const val = message.trim();
@@ -1594,7 +1494,6 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         return;
     }
 
-    // ── Удалить запись расписания ─────────────────────────────────────────────
     if (action === 'schedule_delete' && step === 'id') {
         const id = parseInt(val);
         if (!id) {
@@ -1617,9 +1516,6 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
     await sendMessage(domain, authToken, botId, dialogId, `⚠️ Что-то пошло не так. Начни заново.`, kbAdmin());
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-//  ВСПОМОГАТЕЛЬНЫЕ МАРШРУТЫ
-// ═════════════════════════════════════════════════════════════════════════════
 
 app.get('/', (req, res) => {
     res.send(`<h1>🤖 Бот учёта рабочего времени</h1><ul>
@@ -1702,8 +1598,6 @@ app.get('/test-bot', async (req, res) => {
         report_email:  REPORT_EMAIL,
     });
 });
-
-// Принудительная синхронизация всех сотрудников из Битрикс24
 app.get('/sync-employees', async (req, res) => {
     const domain = req.query.domain || BITRIX_DOMAIN;
     const portal = await getPortal(domain);
@@ -1712,15 +1606,12 @@ app.get('/sync-employees', async (req, res) => {
     const { rows } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
     res.json({ ok:true, synced: count, employees: rows });
 });
-
-// ─── Очистка ──────────────────────────────────────────────────────────────────
 cron.schedule('*/15 * * * *', async () => {
     await pool.query(`DELETE FROM geo_tokens WHERE created_at < NOW()-INTERVAL '15 minutes'`);
     await pool.query(`DELETE FROM pending_input WHERE action != 'admin_session' AND created_at < NOW()-INTERVAL '30 minutes'`);
     console.log('🧹 Очистка токенов и pending');
 });
 
-// ─── Запуск ───────────────────────────────────────────────────────────────────
 initDB().then(() => {
     app.listen(port, '0.0.0.0', () => {
         console.log(`🚀 Сервер: https://${APP_DOMAIN}`);
