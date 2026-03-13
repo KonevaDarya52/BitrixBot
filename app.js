@@ -86,8 +86,6 @@ function getDistance(lat1, lon1, lat2, lon2) {
     return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
-// Проверяет, находится ли точка в радиусе любого из офисов.
-// Возвращает { inOffice: bool, officeName: string }
 function checkOffice(lat, lon) {
     const d1 = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON);
     if (d1 <= OFFICE_RADIUS) return { inOffice: true, officeName: 'Офис' };
@@ -301,7 +299,7 @@ function buildGreeting(userName, firstName, adminMode, alreadyMarked) {
     if (adminMode) {
         return (
             `${timeEmoji} ${timeGreeting}, ${name}! 👋\n\n` +
-            `🔐 Вы в режиме *администратора*.\n\n` +
+            `🔐 Вы в режиме администратора.\n\n` +
             `📌 Что доступно:\n` +
             `• 📋 Отчёты — приход/уход сотрудников\n` +
             `• 👥 Кто в офисе — онлайн-список\n` +
@@ -867,14 +865,14 @@ app.post('/confirm-geo', async (req, res) => {
 
     let text;
     if (rec.type === 'in') {
-        text = `✅ *Приход зафиксирован в ${time}!*\n📍 ${officeName}\n\nУдачного рабочего дня! 💪`;
+        text = `✅ Приход зафиксирован в ${time}!\n📍 ${officeName}\n\nУдачного рабочего дня! 💪`;
     } else {
-        text = `🚪 *Уход зафиксирован в ${time}!*\n📍 ${officeName}`;
+        text = `🚪 Уход зафиксирован в ${time}!\n📍 ${officeName}`;
         const marks  = await getTodayMarks(rec.user_id);
         const inMark = marks.filter(m => m.type === 'in').at(-1);
         if (inMark) {
             const diff = (Date.now() - new Date(inMark.timestamp)) / 1000;
-            text += `\n⏱ Отработано сегодня: *${formatDuration(diff)}*`;
+            text += `\n⏱ Отработано сегодня: ${formatDuration(diff)}`;
         }
         text += `\n\nОтличная работа — хорошего вечера! 🌆`;
     }
@@ -964,7 +962,7 @@ app.post('/imbot', async (req, res) => {
             const sel  = (pending.data.foundUsers || [])[idx];
             if (!sel) { await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Сотрудник не найден.`, kbCancel()); return; }
             await setPending(FROM_USER_ID, 'schedule_add', 'date_from', { ...pending.data, userId: sel.id, userName: sel.name, adminSession: true });
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `👤 Сотрудник: *${sel.name}*\n\n📅 Введи дату *начала* в формате *ДД.ММ.ГГГГ*:`, kbCancel());
+            await sendMessage(domain, authToken, botId, DIALOG_ID, `👤 Сотрудник: ${sel.name}\n\n📅 Введи дату начала в формате ДД.ММ.ГГГГ:`, kbCancel());
             return;
         }
 
@@ -1001,38 +999,38 @@ app.post('/imbot', async (req, res) => {
             const lastMark = await getLastMark(FROM_USER_ID);
             if (lastMark && lastMark.type === 'in') {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `⚠️ Уже есть активная отметка прихода!\nСначала нажми *"🚪 Ушёл"*, чтобы закрыть прошлую смену.`, kb);
+                    `⚠️ Уже есть активная отметка прихода!\nСначала нажми "🚪 Ушёл", чтобы закрыть прошлую смену.`, kb);
                 return;
             }
             const sched = await getActiveSchedule(FROM_USER_ID);
             if (sched && ['vacation','sick','dayoff'].includes(sched.status)) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `ℹ️ По расписанию у вас сегодня: *${SCHED_LABELS[sched.status]}*\nЕсли всё верно — ссылка для отметки ниже 👇`, null);
+                    `ℹ️ По расписанию у вас сегодня: ${SCHED_LABELS[sched.status]}\nЕсли всё верно — ссылка для отметки ниже 👇`, null);
             }
             const token = makeToken();
             await saveGeoToken(token, FROM_USER_ID, resolvedName, DIALOG_ID, botId, domain, authToken, 'in');
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `📍 Нажми кнопку ниже, чтобы подтвердить приход.\n⏰ *Ссылка действует 10 минут!*`,
+                `📍 Нажми кнопку ниже, чтобы подтвердить приход.\n⏰ Ссылка действует 10 минут!`,
                 kbGeo(`${geoUrl}?token=${token}`, 'in'));
 
         } else if (action === 'left' || action === 'ушел' || action === 'ушёл') {
             const lastMark = await getLastMark(FROM_USER_ID);
             if (!lastMark || lastMark.type !== 'in') {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `⚠️ Нет активной отметки прихода!\nСначала нажми *"✅ Пришёл"*, чтобы начать рабочий день.`, kb);
+                    `⚠️ Нет активной отметки прихода!\nСначала нажми "✅ Пришёл", чтобы начать рабочий день.`, kb);
                 return;
             }
             const token = makeToken();
             await saveGeoToken(token, FROM_USER_ID, resolvedName, DIALOG_ID, botId, domain, authToken, 'out');
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `📍 Нажми кнопку ниже, чтобы подтвердить уход.\n⏰ *Ссылка действует 10 минут!*`,
+                `📍 Нажми кнопку ниже, чтобы подтвердить уход.\n⏰ Ссылка действует 10 минут!`,
                 kbGeo(`${geoUrl}?token=${token}`, 'out'));
 
         } else if (action === 'status' || action === 'статус') {
             const marks = await getTodayMarks(FROM_USER_ID);
             if (!marks.length) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `📊 Сегодня отметок пока нет.\n\nНажми *"✅ Пришёл"* чтобы начать рабочий день! 👇`, kb);
+                    `📊 Сегодня отметок пока нет.\n\nНажми "✅ Пришёл" чтобы начать рабочий день! 👇`, kb);
                 return;
             }
             let totalSeconds = 0, lastInTime = null, lastType = null;
@@ -1056,17 +1054,17 @@ app.post('/imbot', async (req, res) => {
                 }
             }
             if (lastType === 'in') lines.push('⏳ Смена ещё не закрыта');
-            const totalStr = totalSeconds > 0 ? `\n\n⏱ *Итого в офисе: ${formatDuration(totalSeconds)}*` : '';
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 *Твои отметки за сегодня:*\n\n${lines.join('\n')}${totalStr}`, kb);
+            const totalStr = totalSeconds > 0 ? `\n\n⏱ Итого в офисе: ${formatDuration(totalSeconds)}` : '';
+            await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Твои отметки за сегодня:\n\n${lines.join('\n')}${totalStr}`, kb);
 
         } else if (action === 'help' || action === 'помощь') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `🤖 *Бот учёта рабочего времени*\n\n` +
-                `✅ *Пришёл* — отметить начало рабочего дня\n` +
-                `🚪 *Ушёл* — отметить конец рабочего дня\n` +
-                `📊 *Статус* — посмотреть свои отметки за сегодня\n\n` +
+                `🤖 Бот учёта рабочего времени\n\n` +
+                `✅ Пришёл — отметить начало рабочего дня\n` +
+                `🚪 Ушёл — отметить конец рабочего дня\n` +
+                `📊 Статус — посмотреть свои отметки за сегодня\n\n` +
                 `После нажатия кнопки откроется страница для подтверждения геолокации.\n` +
-                `⏰ *Ссылка действует 10 минут!*`, kb);
+                `⏰ Ссылка действует 10 минут!`, kb);
 
         } else if (action === 'menu' || action === 'назад' || action === 'меню') {
             await sendMessage(domain, authToken, botId, DIALOG_ID, `👇 Выбери нужное действие:`, kb);
@@ -1085,19 +1083,19 @@ app.post('/imbot', async (req, res) => {
             const schedIds    = new Set(schedToday.map(r => r.user_id));
             const presentIds  = new Set(present.map(r => r.user_id));
             const absent      = allEmps.filter(e => !presentIds.has(e.user_id) && !schedIds.has(e.user_id));
-            let text = `📋 *Отчёт за ${new Date().toLocaleDateString('ru-RU')}*\n\n`;
+            let text = `📋 Отчёт за ${new Date().toLocaleDateString('ru-RU')}\n\n`;
             if (present.length) {
-                text += `✅ *Явились (${present.length} чел.):*\n`;
+                text += `✅ Явились (${present.length} чел.):\n`;
                 present.forEach(r => {
                     text += `• ${r.user_name||r.user_id}: ${r.in_time ? tzTime(r.in_time) : '?'} → ${r.out_time ? tzTime(r.out_time) : '🟢 в офисе'}\n`;
                 });
             } else { text += `Сегодня отметок нет.\n`; }
             if (schedToday.length) {
-                text += `\n📅 *По расписанию:*\n`;
+                text += `\n📅 По расписанию:\n`;
                 schedToday.forEach(r => { text += `• ${r.user_name}: ${SCHED_LABELS[r.status]||r.status}\n`; });
             }
             if (absent.length) {
-                text += `\n❌ *Не отметились (${absent.length} чел.):*\n`;
+                text += `\n❌ Не отметились (${absent.length} чел.):\n`;
                 absent.forEach(r => { text += `• ${r.user_name}\n`; });
             }
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
@@ -1108,7 +1106,7 @@ app.post('/imbot', async (req, res) => {
                 SELECT e.user_name, COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
                 FROM employees e LEFT JOIN attendance a ON a.user_id=e.user_id AND a.type='in' AND a.timestamp>=NOW()-INTERVAL '7 days'
                 GROUP BY e.user_id, e.user_name ORDER BY days DESC, e.user_name`);
-            let text = `📅 *Отчёт за 7 дней*\n\n`;
+            let text = `📅 Отчёт за 7 дней\n\n`;
             rows.length ? rows.forEach(r => { const d=Number(r.days); text+=`${d===0?'❌':d<3?'⚠️':'✅'} ${r.user_name}: ${d} раб. дн.\n`; })
                         : text += `Нет зарегистрированных сотрудников.`;
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
@@ -1119,7 +1117,7 @@ app.post('/imbot', async (req, res) => {
                 SELECT e.user_name, COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
                 FROM employees e LEFT JOIN attendance a ON a.user_id=e.user_id AND a.type='in' AND a.timestamp>=NOW()-INTERVAL '30 days'
                 GROUP BY e.user_id, e.user_name ORDER BY days DESC, e.user_name`);
-            let text = `📆 *Отчёт за 30 дней*\n\n`;
+            let text = `📆 Отчёт за 30 дней\n\n`;
             rows.length ? rows.forEach(r => { const d=Number(r.days); text+=`${d===0?'❌':d<10?'⚠️':'✅'} ${r.user_name}: ${d} раб. дн.\n`; })
                         : text += `Нет зарегистрированных сотрудников.`;
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
@@ -1131,7 +1129,7 @@ app.post('/imbot', async (req, res) => {
                 FROM attendance
                 WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date=(NOW() AT TIME ZONE 'Asia/Yekaterinburg')::date
                 GROUP BY user_id, user_name HAVING MAX(CASE WHEN type='out' THEN 1 ELSE 0 END)=0 ORDER BY user_name`);
-            let text = `👥 *Сейчас в офисе — ${rows.length} чел.:*\n\n`;
+            let text = `👥 Сейчас в офисе — ${rows.length} чел.:\n\n`;
             rows.length ? rows.forEach(r => { text += `• ${r.user_name||r.user_id} (с ${r.in_time ? tzTime(r.in_time) : '?'})\n`; })
                         : text += `Сейчас никого нет в офисе.`;
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
@@ -1199,7 +1197,7 @@ app.post('/imbot', async (req, res) => {
             if (!admins.length) { await sendMessage(domain, authToken, botId, DIALOG_ID, `ℹ️ Дополнительных администраторов нет.`, kbAdminManage()); return; }
             await setPending(FROM_USER_ID, 'admin_remove', 'user_id', { adminSession:true });
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `➖ Удаление администратора\n\n${admins.map(a=>`• ${a.user_name||'Без имени'} — ID: ${a.user_id}`).join('\n')}\n\nВведи *ID* для удаления:`, kbCancel());
+                `➖ Удаление администратора\n\n${admins.map(a=>`• ${a.user_name||'Без имени'} — ID: ${a.user_id}`).join('\n')}\n\nВведи ID для удаления:`, kbCancel());
 
         } else {
             const greetings = ['привет','hello','hi','хай','здравствуй','здравствуйте','добрый день','добрый вечер','доброе утро','добрый','ку','хэй','салют','даров','дарова'];
@@ -1247,15 +1245,15 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
     }
 
     if (action === 'schedule_add' && step === 'search_user') {
-        await sendMessage(domain, authToken, botId, dialogId, `🔍 Ищу *"${val}"*...`, null);
+        await sendMessage(domain, authToken, botId, dialogId, `🔍 Ищу "${val}"...`, null);
         const users = await searchBitrixUsers(domain, authToken, val);
         if (!users.length) {
-            await sendMessage(domain, authToken, botId, dialogId, `❌ Сотрудник *"${val}"* не найден.\n\nПопробуй другое имя:`, kbCancel());
+            await sendMessage(domain, authToken, botId, dialogId, `❌ Сотрудник "${val}" не найден.\n\nПопробуй другое имя:`, kbCancel());
             return;
         }
         if (users.length === 1) {
             await setPending(userId, 'schedule_add', 'date_from', { ...data, userId: users[0].id, userName: users[0].name });
-            await sendMessage(domain, authToken, botId, dialogId, `👤 Найден: *${users[0].name}*\n\n📅 Введи дату *начала* в формате *ДД.ММ.ГГГГ*:`, kbCancel());
+            await sendMessage(domain, authToken, botId, dialogId, `👤 Найден: ${users[0].name}\n\n📅 Введи дату начала в формате ДД.ММ.ГГГГ:`, kbCancel());
             return;
         }
         await setPending(userId, 'schedule_select_user', 'pick', { ...data, foundUsers: users });
@@ -1267,17 +1265,17 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
 
     if (action === 'schedule_add' && step === 'date_from') {
         const d = parseDate(val);
-        if (!d) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Неверный формат. Введи *ДД.ММ.ГГГГ*, например: *15.03.2025*`, kbCancel()); return; }
+        if (!d) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Неверный формат. Введи ДД.ММ.ГГГГ, например: 15.03.2025`, kbCancel()); return; }
         await setPending(userId, 'schedule_add', 'date_to', { ...data, dateFrom: d });
-        await sendMessage(domain, authToken, botId, dialogId, `✅ Начало: *${val}*\n\n📅 Введи дату *окончания*:`, kbCancel());
+        await sendMessage(domain, authToken, botId, dialogId, `✅ Начало: ${val}\n\n📅 Введи дату окончания:`, kbCancel());
         return;
     }
 
     if (action === 'schedule_add' && step === 'date_to') {
         const d = parseDate(val);
-        if (!d) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Неверный формат. Введи *ДД.ММ.ГГГГ*:`, kbCancel()); return; }
+        if (!d) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Неверный формат. Введи ДД.ММ.ГГГГ:`, kbCancel()); return; }
         await setPending(userId, 'schedule_add', 'comment', { ...data, dateTo: d });
-        await sendMessage(domain, authToken, botId, dialogId, `✅ Окончание: *${val}*\n\n💬 Введи комментарий (или *-* если не нужен):`, kbCancel());
+        await sendMessage(domain, authToken, botId, dialogId, `✅ Окончание: ${val}\n\n💬 Введи комментарий (или *-* если не нужен):`, kbCancel());
         return;
     }
 
@@ -1292,15 +1290,15 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         const label = SCHED_LABELS[data.status];
 
         await done(
-            `✅ *Запись добавлена в расписание!*\n\n👤 ${data.userName}\n📋 ${label}\n📅 ${from} — ${to}` + (comment ? `\n💬 ${comment}` : ''),
+            `✅ Запись добавлена в расписание!\n\n👤 ${data.userName}\n📋 ${label}\n📅 ${from} — ${to}` + (comment ? `\n💬 ${comment}` : ''),
             kbSchedule());
 
         // Уведомляем сотрудника в его личный чат с ботом
         if (data.userId) {
             const portal = await getPortal(domain);
             if (portal?.bot_id) {
-                const notifyText = `📅 *Вам назначено расписание*\n\n${label}\n📅 ${from} — ${to}` +
-                    (comment ? `\n💬 ${comment}` : '') + `\n\n_Информация внесена администратором._`;
+                const notifyText = `📅 Вам назначено расписание\n\n${label}\n📅 ${from} — ${to}` +
+                    (comment ? `\n💬 ${comment}` : '') + `\n\nИнформация внесена администратором.`;
                 const sent = await notifyUserInBotChat(domain, authToken, portal.bot_id, data.userId, notifyText);
                 if (!sent) {
                     console.warn(`⚠️ Сотрудник ${data.userName} (ID=${data.userId}) ещё не открывал чат с ботом — уведомление не отправлено`);
