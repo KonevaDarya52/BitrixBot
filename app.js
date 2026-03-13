@@ -307,7 +307,7 @@ function buildGreeting(userName, firstName, adminMode, alreadyMarked) {
             `• 👥 Кто в офисе — онлайн-список\n` +
             `• 🗓 Расписание — отпуска, больничные, выходные\n` +
             `• 👤 Управление — добавить/удалить администратора\n` +
-            `• 📤 Отчёт на почту — Excel на почту\n\n` +
+            `• 📤 Отчёт на почту — файл Excel с отчётом\n\n` +
             `⬇️ Выбирай действие:`
         );
     }
@@ -1138,31 +1138,31 @@ app.post('/imbot', async (req, res) => {
 
         } else if (action === 'send_report') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `📤 Выбери период — отчёт Excel придёт на *${REPORT_EMAIL}*:`, kbEmailPeriod());
+            await sendMessage(domain, authToken, botId, DIALOG_ID, `📤 Выбери период — отчёт Excel придёт на почту ko******vk.com:`, kbEmailPeriod());
 
         } else if (action === 'email_today' || action === 'email_week' || action === 'email_month') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await sendMessage(domain, authToken, botId, DIALOG_ID, `⏳ Формирую Excel-отчёт и отправляю на почту...`, kbAdmin());
             const result = await sendReportByEmail(action.replace('email_', ''));
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                result.ok ? `✅ *Отчёт успешно отправлен!*\n📧 ${REPORT_EMAIL}`
+                result.ok ? `✅ Отчёт успешно отправлен!\n📧 ${REPORT_EMAIL}`
                           : `❌ Не удалось отправить отчёт.\n\n_${result.error}_`, kbAdmin());
 
         } else if (action === 'schedule') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `🗓 *Управление расписанием*\n\nДобавь событие или посмотри список:`, kbSchedule());
+            await sendMessage(domain, authToken, botId, DIALOG_ID, `🗓 Управление расписанием\n\nДобавь событие или посмотри список:`, kbSchedule());
 
         } else if (['sched_vacation','sched_sick','sched_dayoff','sched_remote','sched_business'].includes(action)) {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const statusMap = { sched_vacation:'vacation', sched_sick:'sick', sched_dayoff:'dayoff', sched_remote:'remote', sched_business:'business' };
             const status = statusMap[action];
             await setPending(FROM_USER_ID, 'schedule_add', 'search_user', { status, adminSession:true });
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `${SCHED_LABELS[status]} — *добавление записи*\n\n🔍 Введи имя или фамилию сотрудника:`, kbCancel());
+            await sendMessage(domain, authToken, botId, DIALOG_ID, `${SCHED_LABELS[status]} — добавление записи\n\n🔍 Введи имя или фамилию сотрудника:`, kbCancel());
 
         } else if (action === 'sched_list') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const { rows } = await pool.query(`SELECT * FROM schedules WHERE date_to>=CURRENT_DATE ORDER BY date_from, user_name`);
-            let text = `📋 *Актуальное расписание:*\n\n`;
+            let text = `📋 Актуальное расписание:\n\n`;
             rows.length ? rows.forEach(r => {
                 text += `• [${r.id}] ${r.user_name}: ${SCHED_LABELS[r.status]||r.status}\n  📅 ${new Date(r.date_from).toLocaleDateString('ru-RU')} — ${new Date(r.date_to).toLocaleDateString('ru-RU')}`;
                 if (r.comment) text += `\n  💬 ${r.comment}`;
@@ -1173,16 +1173,16 @@ app.post('/imbot', async (req, res) => {
         } else if (action === 'sched_delete') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await setPending(FROM_USER_ID, 'schedule_delete', 'id', { adminSession:true });
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `🗑 Введи *ID записи* (цифру в [скобках] из списка):`, kbCancel());
+            await sendMessage(domain, authToken, botId, DIALOG_ID, `🗑 Введи ID записи (цифру в [скобках] из списка):`, kbCancel());
 
         } else if (action === 'admin_manage') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `👤 *Управление администраторами*`, kbAdminManage());
+            await sendMessage(domain, authToken, botId, DIALOG_ID, `👤 Управление администраторами`, kbAdminManage());
 
         } else if (action === 'admin_list') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const admins = await listAdmins();
-            let text = `📋 *Список администраторов:*\n\n👑 ID ${MANAGER_ID} — главный администратор\n`;
+            let text = `📋 Список администраторов:\n\n👑 ID ${MANAGER_ID} — главный администратор\n`;
             admins.forEach(a => { text += `• ${a.user_name||'Без имени'} (ID: ${a.user_id})\n`; });
             if (!admins.length) text += `\nДополнительных администраторов нет.`;
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdminManage());
@@ -1191,7 +1191,7 @@ app.post('/imbot', async (req, res) => {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await setPending(FROM_USER_ID, 'admin_add', 'user_id', { adminSession:true });
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `➕ *Добавление администратора*\n\nВведи *ID пользователя* Битрикс24:\n_Найти в профиле: /company/personal/user/*123*/_`, kbCancel());
+                `➕ Добавление администратора\n\nВведи ID пользователя Битрикс24:\nНайти в профиле: /company/personal/user/*123*/`, kbCancel());
 
         } else if (action === 'admin_remove') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
@@ -1199,7 +1199,7 @@ app.post('/imbot', async (req, res) => {
             if (!admins.length) { await sendMessage(domain, authToken, botId, DIALOG_ID, `ℹ️ Дополнительных администраторов нет.`, kbAdminManage()); return; }
             await setPending(FROM_USER_ID, 'admin_remove', 'user_id', { adminSession:true });
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `➖ *Удаление администратора*\n\n${admins.map(a=>`• ${a.user_name||'Без имени'} — ID: ${a.user_id}`).join('\n')}\n\nВведи *ID* для удаления:`, kbCancel());
+                `➖ Удаление администратора\n\n${admins.map(a=>`• ${a.user_name||'Без имени'} — ID: ${a.user_id}`).join('\n')}\n\nВведи *ID* для удаления:`, kbCancel());
 
         } else {
             const greetings = ['привет','hello','hi','хай','здравствуй','здравствуйте','добрый день','добрый вечер','доброе утро','добрый','ку','хэй','салют','даров','дарова'];
@@ -1233,7 +1233,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         const b24user = await getBitrixUser(domain, authToken, newId);
         const newName = b24user?.name || `Пользователь ${newId}`;
         await addAdmin(newId, newName);
-        await done(`✅ *${newName} (ID ${newId}) теперь администратор!*\n\nЕму стала доступна кнопка *"🔐 Режим администратора"*.`, kbAdminManage());
+        await done(`✅ ${newName} (ID ${newId}) теперь администратор!\n\nЕму стала доступна кнопка "🔐 Режим администратора".`, kbAdminManage());
         return;
     }
 
@@ -1242,7 +1242,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         if (!remId) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Введи числовой ID:`, kbCancel()); return; }
         if (String(remId) === String(MANAGER_ID)) { await done(`🚫 Нельзя удалить главного администратора!`, kbAdminManage()); return; }
         await removeAdmin(remId);
-        await done(`✅ Пользователь ID ${remId} *удалён из администраторов*.`, kbAdminManage());
+        await done(`✅ Пользователь ID ${remId} удалён из администраторов.`, kbAdminManage());
         return;
     }
 
