@@ -1225,6 +1225,8 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         await sendMessage(domain, authToken, botId, dialogId, text, kb || kbAdmin());
     }
 
+    
+
     if (action === 'admin_add') {
         const newId = val.replace(/\D/g,'');
         if (!newId) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Введи числовой ID, например: *123*`, kbCancel()); return; }
