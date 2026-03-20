@@ -1,14 +1,9 @@
 require('dotenv').config();
+const reports = require('./reports');
 const express    = require('express');
 const axios      = require('axios');
 const { Pool }   = require('pg');
 const cron       = require('node-cron');
-const ExcelJS    = require('exceljs');
-const nodemailer = require('nodemailer');
-const dns        = require('dns');
-const os         = require('os');
-const path       = require('path');
-const fs         = require('fs');
 
 const app  = express();
 const port = process.env.PORT || 10000;
@@ -25,11 +20,13 @@ const OFFICE2_LAT   = process.env.OFFICE2_LAT ? parseFloat(process.env.OFFICE2_L
 const OFFICE2_LON   = process.env.OFFICE2_LON ? parseFloat(process.env.OFFICE2_LON) : null;
 const OFFICE2_NAME  = process.env.OFFICE2_NAME || 'Филиал';
 const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
-const REPORT_EMAIL  = process.env.REPORT_EMAIL             || 'koneva_dashenka06@vk.com';
-const SMTP_HOST     = process.env.SMTP_HOST                || 'smtp.mail.ru';
-const SMTP_PORT     = parseInt(process.env.SMTP_PORT       || '587');
-const SMTP_USER     = process.env.SMTP_USER                || '';
-const SMTP_PASS     = process.env.SMTP_PASS                || '';
+const smtpConfig = {
+    smtpHost:    process.env.SMTP_HOST   || 'smtp.mail.ru',
+    smtpPort:    parseInt(process.env.SMTP_PORT || '587'),
+    smtpUser:    process.env.SMTP_USER   || '',
+    smtpPass:    process.env.SMTP_PASS   || '',
+    reportEmail: process.env.REPORT_EMAIL || '',
+};
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -437,157 +434,14 @@ async function mainKb(userId) {
     return (await isAdmin(userId)) ? kbMainAdmin() : kbMain();
 }
 
-// ─── Excel / Email ────────────────────────────────────────────────────────────
+// ─── Excel / Email — делегируем в reports.js ─────────────────────────────────
 
 async function buildExcelReport(period) {
-    const workbook = new ExcelJS.Workbook();
-    workbook.creator = 'Бот учёта рабочего времени';
-    const today = todaySV();
-    let title, sheetData;
-
-    if (period === 'today') {
-        title = `Отчёт за ${new Date().toLocaleDateString('ru-RU')}`;
-        const { rows: present } = await pool.query(`
-            SELECT user_name, user_id,
-                MIN(CASE WHEN type='in' THEN timestamp END) as in_time,
-                MAX(CASE WHEN type='out' THEN timestamp END) as out_time
-            FROM attendance
-            WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date=$1::date
-            GROUP BY user_id, user_name ORDER BY user_name`, [today]);
-        const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
-        const schedToday   = await getSchedulesToday();
-        const schedIds     = new Set(schedToday.map(r => r.user_id));
-        const presentIds   = new Set(present.map(r => r.user_id));
-        const absent       = allEmps.filter(e => !presentIds.has(e.user_id) && !schedIds.has(e.user_id));
-        sheetData = [
-            ...present.map(r => ({
-                name:   r.user_name || r.user_id,
-                in:     r.in_time  ? tzTime(r.in_time)  : '—',
-                out:    r.out_time ? tzTime(r.out_time) : '🟢 в офисе',
-                status: r.out_time ? '✅ Ушёл' : '🟢 В офисе',
-            })),
-            ...schedToday.map(r => ({
-                name: r.user_name, in: '—', out: '—', status: SCHED_LABELS[r.status] || r.status,
-            })),
-            ...absent.map(r => ({ name: r.user_name, in: '—', out: '—', status: '❌ Не отметился' })),
-        ];
-    } else if (period === 'week') {
-        title = 'Отчёт за 7 дней';
-        const { rows } = await pool.query(`
-            SELECT e.user_name, COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
-            FROM employees e LEFT JOIN attendance a ON a.user_id=e.user_id AND a.type='in' AND a.timestamp>=NOW()-INTERVAL '7 days'
-            GROUP BY e.user_id, e.user_name ORDER BY days DESC, e.user_name`);
-        sheetData = rows.map(r => ({ name: r.user_name, days: Number(r.days) }));
-    } else {
-        title = 'Отчёт за 30 дней';
-        const { rows } = await pool.query(`
-            SELECT e.user_name, COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
-            FROM employees e LEFT JOIN attendance a ON a.user_id=e.user_id AND a.type='in' AND a.timestamp>=NOW()-INTERVAL '30 days'
-            GROUP BY e.user_id, e.user_name ORDER BY days DESC, e.user_name`);
-        sheetData = rows.map(r => ({ name: r.user_name, days: Number(r.days) }));
-    }
-
-    const sheet = workbook.addWorksheet('Отметки');
-    sheet.mergeCells('A1:E1');
-    const titleCell = sheet.getCell('A1');
-    titleCell.value = title;
-    titleCell.font  = { bold: true, size: 14, color: { argb: 'FF1a1a2e' } };
-    titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
-    titleCell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFe8f0fe' } };
-    sheet.getRow(1).height = 28;
-    sheet.addRow([]);
-
-    const headers = period === 'today' ? ['Сотрудник', 'Приход', 'Уход', 'Статус'] : ['Сотрудник', 'Рабочих дней'];
-    const headerRow = sheet.addRow(headers);
-    headerRow.eachCell(cell => {
-        cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
-        cell.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FF2D8CFF' } };
-        cell.alignment = { horizontal:'center', vertical:'middle' };
-        cell.border = { bottom: { style:'thin', color:{ argb:'FF1a6ad4' } } };
-    });
-    headerRow.height = 22;
-
-    sheetData.forEach((r, i) => {
-        const row = sheet.addRow(period === 'today' ? [r.name, r.in, r.out, r.status] : [r.name, r.days]);
-        if (i % 2 === 0) row.eachCell(c => { c.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFf5f8ff' } }; });
-        row.eachCell(c => { c.alignment = { vertical:'middle' }; });
-        row.height = 20;
-    });
-    sheet.columns = period === 'today' ? [{ width:26 },{ width:12 },{ width:14 },{ width:20 }] : [{ width:26 },{ width:16 }];
-
-    const schedRows = (await pool.query(`SELECT * FROM schedules WHERE date_to>=$1 ORDER BY date_from, user_name`, [today])).rows;
-    if (schedRows.length) {
-        const s2 = workbook.addWorksheet('Расписание');
-        s2.mergeCells('A1:E1');
-        const t2 = s2.getCell('A1');
-        t2.value = 'Расписание сотрудников';
-        t2.font  = { bold:true, size:13 };
-        t2.alignment = { horizontal:'center' };
-        t2.fill = { type:'pattern', pattern:'solid', fgColor:{ argb:'FFfff3e0' } };
-        s2.getRow(1).height = 26;
-        s2.addRow([]);
-        const sh2 = s2.addRow(['Сотрудник','Статус','Дата начала','Дата конца','Комментарий']);
-        sh2.eachCell(c => { c.font={bold:true,color:{argb:'FFFFFFFF'}}; c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFE07B29'}}; c.alignment={horizontal:'center'}; });
-        schedRows.forEach((r, i) => {
-            const row = s2.addRow([r.user_name, SCHED_LABELS[r.status]||r.status,
-                new Date(r.date_from).toLocaleDateString('ru-RU'), new Date(r.date_to).toLocaleDateString('ru-RU'), r.comment||'']);
-            if (i%2===0) row.eachCell(c=>{c.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFfff8f0'}};});
-        });
-        s2.columns = [{width:24},{width:18},{width:16},{width:16},{width:30}];
-    }
-
-    const tmpFile = path.join(os.tmpdir(), `report_${period}_${Date.now()}.xlsx`);
-    await workbook.xlsx.writeFile(tmpFile);
-    return { file: tmpFile, title };
+    return reports.buildExcelReport(pool, period);
 }
 
 async function sendReportByEmail(period) {
-    if (!SMTP_USER || !SMTP_PASS) {
-        return { ok:false, error:'SMTP не настроен (SMTP_USER и SMTP_PASS пустые).' };
-    }
-    try {
-        const { file, title } = await buildExcelReport(period);
-
-        // Принудительно резолвим хост в IPv4 — Render иначе уходит на IPv6 (ENETUNREACH)
-        let smtpIp = SMTP_HOST;
-        try {
-            await new Promise((resolve, reject) => {
-                dns.lookup(SMTP_HOST, { family: 4 }, (err, addr) => {
-                    if (err) reject(err);
-                    else { smtpIp = addr; resolve(); }
-                });
-            });
-            console.log(`📧 SMTP: ${SMTP_HOST} → ${smtpIp}:${SMTP_PORT}`);
-        } catch (e) {
-            console.warn(`⚠️ DNS lookup failed: ${e.message}, используем hostname`);
-        }
-
-        const transporter = nodemailer.createTransport({
-            host:              smtpIp,
-            port:              SMTP_PORT,
-            secure:            false,
-            auth:              { user: SMTP_USER, pass: SMTP_PASS },
-            tls:               { rejectUnauthorized: false, servername: SMTP_HOST },
-            connectionTimeout: 20000,
-            greetingTimeout:   15000,
-            socketTimeout:     30000,
-            family:            4,
-        });
-
-        await transporter.sendMail({
-            from:        `"Учёт времени" <${SMTP_USER}>`,
-            to:          REPORT_EMAIL,
-            subject:     `📊 ${title}`,
-            text:        `Автоматический отчёт от бота учёта рабочего времени.\nПериод: ${title}`,
-            attachments: [{ filename: `${title}.xlsx`, path: file }],
-        });
-
-        try { fs.unlinkSync(file); } catch(_) {}
-        return { ok:true };
-    } catch(err) {
-        console.error('❌ Email error:', err.message);
-        return { ok:false, error: err.message };
-    }
+    return reports.sendReportByEmail(pool, period, smtpConfig);
 }
 
 // ─── БД: порталы, посещаемость, токены ───────────────────────────────────────
@@ -1143,7 +997,7 @@ app.post('/imbot', async (req, res) => {
             await sendMessage(domain, authToken, botId, DIALOG_ID, `⏳ Формирую Excel-отчёт и отправляю на почту...`, kbAdmin());
             const result = await sendReportByEmail(action.replace('email_', ''));
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                result.ok ? `✅ Отчёт успешно отправлен!\n📧 ${REPORT_EMAIL}`
+                result.ok ? `✅ Отчёт успешно отправлен!\n📧 ${smtpConfig.reportEmail}`
                           : `❌ Не удалось отправить отчёт.\n\n_${result.error}_`, kbAdmin());
 
         } else if (action === 'schedule') {
@@ -1340,7 +1194,7 @@ app.get('/status', async (req, res) => {
     res.json({ ok:true, service:'v14', portals:rows, time:new Date().toISOString(),
         env:{ app_domain:APP_DOMAIN, office:`${OFFICE_LAT},${OFFICE_LON}`, radius:OFFICE_RADIUS,
               office2: OFFICE2_LAT ? `${OFFICE2_LAT},${OFFICE2_LON} (${OFFICE2_NAME})` : 'не задан',
-              manager:MANAGER_ID, report_email:REPORT_EMAIL, smtp:`${SMTP_HOST}:${SMTP_PORT}`, smtp_ready:!!(SMTP_USER&&SMTP_PASS) } });
+              manager:MANAGER_ID, report_email:smtpConfig.reportEmail, smtp:`${smtpConfig.smtpHost}:${smtpConfig.smtpPort}`, smtp_ready:!!(smtpConfig.smtpUser&&smtpConfig.smtpPass) } });
 });
 
 app.get('/debug', async (req, res) => {
@@ -1392,7 +1246,7 @@ app.get('/test-bot', async (req, res) => {
     res.json({ bot_id:portal.bot_id,
         profile_check: profile?.result ? `✅ ${profile.result.NAME} ${profile.result.LAST_NAME}` : '❌',
         bots_in_b24: bots?.result||null, admins_in_db:admins, employees_in_db:employees,
-        smtp:`${SMTP_HOST}:${SMTP_PORT}`, smtp_ready:!!(SMTP_USER&&SMTP_PASS), report_email:REPORT_EMAIL });
+        smtp:`${smtpConfig.smtpHost}:${smtpConfig.smtpPort}`, smtp_ready:!!(smtpConfig.smtpUser&&smtpConfig.smtpPass), report_email:smtpConfig.reportEmail });
 });
 
 app.get('/sync-employees', async (req, res) => {
@@ -1420,9 +1274,10 @@ initDB().then(() => {
         console.log(`📍 Офис 1: ${OFFICE_LAT}, ${OFFICE_LON} (${OFFICE_RADIUS}м)`);
         if (OFFICE2_LAT) console.log(`📍 Офис 2: ${OFFICE2_LAT}, ${OFFICE2_LON} — ${OFFICE2_NAME}`);
         console.log(`🆔 Менеджер: ${MANAGER_ID}`);
-        console.log(`📧 ${REPORT_EMAIL} | SMTP: ${SMTP_USER ? `✅ ${SMTP_HOST}:${SMTP_PORT}` : '❌ не настроен'}`);
+        console.log(`📧 ${smtpConfig.reportEmail} | SMTP: ${smtpConfig.smtpUser ? `✅ ${smtpConfig.smtpHost}:${smtpConfig.smtpPort}` : '❌ не настроен'}`);
         console.log('=== ✅ READY ===');
     });
+    reports.scheduleCronReports(pool, smtpConfig);
 }).catch(err => {
     console.error('❌ БД:', err.message);
     process.exit(1);
