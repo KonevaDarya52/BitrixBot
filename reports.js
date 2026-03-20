@@ -200,59 +200,575 @@ async function buildTodaySheet(workbook, pool) {
     return sheet;
 }
 
-// ─── Лист "Неделя / Месяц" ────────────────────────────────────────────────────
-async function buildPeriodSheet(workbook, pool, days) {
-    const label     = days === 7 ? 'Неделя (7 дней)' : 'Месяц (30 дней)';
-    const interval  = days === 7 ? '7 days' : '30 days';
-    const workDays  = days === 7 ? 5 : 22;  // ожидаемые рабочие дни (приближённо)
+// ─── Вспомогательная: форматировать секунды → "Xч Yмин" ──────────────────────
+function fmtSec(sec) {
+    if (!sec || sec <= 0) return '—';
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return `${h}ч ${m}мин`;
+}
 
-    const { rows } = await pool.query(`
-        SELECT e.user_name, e.user_id,
-            COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days_present,
-            MIN(CASE WHEN a.type='in' THEN (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg') END) as earliest_arrival,
-            MAX(CASE WHEN a.type='in' THEN (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg') END) as latest_arrival
+// ─── Вспомогательная: диапазон дат ───────────────────────────────────────────
+function dateRange(days) {
+    const dates = [];
+    for (let i = days - 1; i >= 0; i--) {
+        const d = new Date();
+        d.setDate(d.getDate() - i);
+        dates.push(d.toLocaleDateString('sv-SE', { timeZone: 'Asia/Yekaterinburg' }));
+    }
+    return dates;
+}
+
+// ─── Лист "Неделя" ────────────────────────────────────────────────────────────
+// Сетка: строки = сотрудники, столбцы = дни недели + сводная статистика
+async function buildWeekSheet(workbook, pool) {
+    const WORK_START_HOUR = 9;
+    const days = 7;
+    const interval = '7 days';
+
+    // Все даты за период (включая выходные — отфильтруем визуально)
+    const allDates = dateRange(days); // ['2026-03-15', ...]
+
+    // Посещаемость по каждому сотруднику за каждый день
+    const { rows: rawData } = await pool.query(`
+        SELECT
+            e.user_id, e.user_name,
+            (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date AS day,
+            MIN(CASE WHEN a.type='in'  THEN (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg') END) AS in_time,
+            MAX(CASE WHEN a.type='out' THEN (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg') END) AS out_time
         FROM employees e
         LEFT JOIN attendance a
             ON a.user_id = e.user_id
-            AND a.type = 'in'
             AND a.timestamp >= NOW() - INTERVAL '${interval}'
-        GROUP BY e.user_id, e.user_name
-        ORDER BY days_present DESC, e.user_name
+        GROUP BY e.user_id, e.user_name, day
+        ORDER BY e.user_name, day
     `);
 
-    const sheet = workbook.addWorksheet(label, {
-        properties: { tabColor: { argb: days === 7 ? 'FF5B8DEF' : 'FF3A7BD5' } },
-    });
-    sheet.views = [{ state: 'frozen', ySplit: 3 }];
+    const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
 
-    sheet.mergeCells('A1:E1');
-    const title = sheet.getCell('A1');
-    title.value = `📅 ${label} — ${new Date().toLocaleDateString('ru-RU', { timeZone: 'Asia/Yekaterinburg' })}`;
-    styleCell(title, { bold: true, bg: C.titleBg, color: C.titleText, align: 'center', size: 14 });
+    // Расписание (отпуск / больничный и т.д.)
+    const { rows: schedRows } = await pool.query(`
+        SELECT user_id, status, date_from, date_to
+        FROM schedules
+        WHERE date_from <= NOW() AND date_to >= NOW() - INTERVAL '${interval}'
+    `);
+
+    // Сборка: empMap[user_id][date] = { in_time, out_time }
+    const empMap = {};
+    for (const e of allEmps) empMap[e.user_id] = { user_name: e.user_name, days: {} };
+    for (const r of rawData) {
+        if (!empMap[r.user_id]) continue;
+        const dStr = r.day ? new Date(r.day).toLocaleDateString('sv-SE') : null;
+        if (dStr) empMap[r.user_id].days[dStr] = { in: r.in_time, out: r.out_time };
+    }
+
+    // Расписание: schedMap[user_id][date] = status
+    const schedMap = {};
+    for (const s of schedRows) {
+        if (!schedMap[s.user_id]) schedMap[s.user_id] = {};
+        let d = new Date(s.date_from);
+        while (d <= new Date(s.date_to)) {
+            schedMap[s.user_id][d.toLocaleDateString('sv-SE')] = s.status;
+            d.setDate(d.getDate() + 1);
+        }
+    }
+
+    // ── Рабочие дни (пн–пт) ──
+    const workDates = allDates.filter(d => {
+        const wd = new Date(d).getDay();
+        return wd >= 1 && wd <= 5;
+    });
+    const workDaysCount = workDates.length;
+
+    const dayNames = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
+    const monthNames = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+
+    // Даты для заголовков
+    const dateLabels = workDates.map(d => {
+        const dt = new Date(d);
+        return `${dayNames[dt.getDay()]} ${dt.getDate()} ${monthNames[dt.getMonth()]}`;
+    });
+
+    // Колонки: имя + день*N + итого статистика
+    const totalCols = 1 + workDates.length + 7; // имя + дни + 7 итоговых столбцов
+    const colLetters = ['A','B','C','D','E','F','G','H','I','J','K','L','M','N','O','P','Q','R'];
+
+    const sheetLabel = `Неделя (${workDaysCount} р.дн.)`;
+    const sheet = workbook.addWorksheet(sheetLabel, {
+        properties: { tabColor: { argb: 'FF5B8DEF' } },
+    });
+    sheet.views = [{ state: 'frozen', xSplit: 1, ySplit: 5 }];
+
+    // ── Строка 1: заголовок ──
+    const lastCol = colLetters[totalCols - 1];
+    sheet.mergeCells(`A1:${lastCol}1`);
+    const titleCell = sheet.getCell('A1');
+    const fromLabel = new Date(workDates[0]).toLocaleDateString('ru-RU');
+    const toLabel   = new Date(workDates[workDates.length - 1]).toLocaleDateString('ru-RU');
+    titleCell.value = `📅 Недельный отчёт посещаемости — ${fromLabel} – ${toLabel}`;
+    styleCell(titleCell, { bold: true, bg: C.titleBg, color: C.titleText, align: 'center', size: 14 });
+    sheet.getRow(1).height = 32;
+
+    // ── Строка 2: пустая ──
+    sheet.addRow([]);
+
+    // ── Строки 3–4: двухуровневый заголовок ──
+    // Строка 3: группировки (Сотрудник | Дни недели | Итоговая статистика)
+    const r3 = sheet.getRow(3);
+    r3.height = 20;
+    // Мержим "Сотрудник"
+    sheet.mergeCells(`A3:A4`);
+    styleCell(sheet.getCell('A3'), { bold: true, color: C.headerText, bg: C.headerBg, align: 'center', size: 11 });
+    sheet.getCell('A3').value = 'Сотрудник';
+
+    // Мержим "Дни недели"
+    const dayStart = 'B';
+    const dayEnd   = colLetters[workDates.length]; // B..F для 5 дней
+    sheet.mergeCells(`${dayStart}3:${dayEnd}3`);
+    styleCell(sheet.getCell(`${dayStart}3`), { bold: true, color: C.headerText, bg: 'FF5B8DEF', align: 'center', size: 11 });
+    sheet.getCell(`${dayStart}3`).value = '📆 Дни недели';
+
+    // Мержим "Итоговая статистика"
+    const statStart = colLetters[1 + workDates.length];
+    sheet.mergeCells(`${statStart}3:${lastCol}3`);
+    styleCell(sheet.getCell(`${statStart}3`), { bold: true, color: C.headerText, bg: 'FF3A7BD5', align: 'center', size: 11 });
+    sheet.getCell(`${statStart}3`).value = '📊 Итоговая статистика';
+
+    // Строка 4: подзаголовки дней и статистик
+    const r4 = sheet.getRow(4);
+    r4.height = 22;
+    workDates.forEach((d, i) => {
+        const cell = r4.getCell(2 + i);
+        cell.value = dateLabels[i];
+        styleCell(cell, { bold: true, color: C.headerText, bg: 'FF5B8DEF', align: 'center', size: 10 });
+    });
+    const statHeaders = ['Явок', `Из ${workDaysCount}`, '% явки', 'Опозданий', 'Ср. приход', 'Ср. часов/день', 'Оценка'];
+    statHeaders.forEach((h, i) => {
+        const cell = r4.getCell(2 + workDates.length + i);
+        cell.value = h;
+        styleCell(cell, { bold: true, color: C.headerText, bg: 'FF3A7BD5', align: 'center', size: 10 });
+    });
+
+    // ── Строка 5: сводка по команде ──
+    let teamPresent = 0, teamLate = 0, teamAbsent = 0, teamArrSec = 0, teamArrCount = 0;
+    // (посчитаем после строк сотрудников)
+
+    // Ширины столбцов
+    sheet.getColumn(1).width = 28;
+    workDates.forEach((_, i) => { sheet.getColumn(2 + i).width = 16; });
+    sheet.getColumn(2 + workDates.length + 0).width = 10;
+    sheet.getColumn(2 + workDates.length + 1).width = 10;
+    sheet.getColumn(2 + workDates.length + 2).width = 10;
+    sheet.getColumn(2 + workDates.length + 3).width = 13;
+    sheet.getColumn(2 + workDates.length + 4).width = 14;
+    sheet.getColumn(2 + workDates.length + 5).width = 16;
+    sheet.getColumn(2 + workDates.length + 6).width = 18;
+
+    // ── Строки сотрудников ──
+    const SCHED_DISPLAY = {
+        vacation: '🏖 Отпуск', sick: '🤒 Больничный',
+        dayoff: '📅 Выходной', remote: '🏠 Удалённо', business: '✈️ Командировка',
+    };
+
+    let rowIdx = 0;
+    const teamStatsRows = []; // для сводки
+
+    for (const emp of allEmps) {
+        const uid = emp.user_id;
+        const daysData = empMap[uid]?.days || {};
+        const sched    = schedMap[uid] || {};
+
+        let daysPresent = 0, lateCount = 0;
+        let totalWorkSec = 0, arrivalSecSum = 0, arrivalCount = 0;
+        let earliestArr = null, latestArr = null;
+
+        const rowValues = [emp.user_name];
+
+        for (const d of workDates) {
+            const rec = daysData[d];
+            const schedStatus = sched[d];
+
+            if (schedStatus) {
+                rowValues.push(SCHED_DISPLAY[schedStatus] || schedStatus);
+            } else if (rec?.in) {
+                const inDt = new Date(rec.in);
+                const inHour = inDt.getHours();
+                const inMin  = inDt.getMinutes();
+                const timeStr = `${String(inHour).padStart(2,'0')}:${String(inMin).padStart(2,'0')}`;
+                const isLate  = inHour > WORK_START_HOUR || (inHour === WORK_START_HOUR && inMin > 10);
+
+                rowValues.push(isLate ? `⚠️ ${timeStr}` : `✅ ${timeStr}`);
+                daysPresent++;
+                if (isLate) lateCount++;
+
+                const arrSec = inHour * 3600 + inMin * 60;
+                arrivalSecSum += arrSec;
+                arrivalCount++;
+                if (!earliestArr || arrSec < earliestArr) earliestArr = arrSec;
+                if (!latestArr   || arrSec > latestArr)   latestArr   = arrSec;
+
+                if (rec.out) {
+                    totalWorkSec += (new Date(rec.out) - inDt) / 1000;
+                }
+            } else {
+                rowValues.push('—');
+            }
+        }
+
+        const pct   = workDaysCount > 0 ? Math.round((daysPresent / workDaysCount) * 100) : 0;
+        const avgArr = arrivalCount > 0 ? arrivalSecSum / arrivalCount : null;
+        const avgArrStr = avgArr !== null
+            ? `${String(Math.floor(avgArr / 3600)).padStart(2,'0')}:${String(Math.floor((avgArr % 3600) / 60)).padStart(2,'0')}`
+            : '—';
+        const avgWorkSec = daysPresent > 0 ? totalWorkSec / daysPresent : 0;
+        const grade = pct >= 90 ? '✅ Отлично' : pct >= 70 ? '⚠️ Допустимо' : lateCount >= 3 ? '⚠️ Опоздания' : '❌ Нарушения';
+
+        rowValues.push(daysPresent, workDaysCount, `${pct}%`, lateCount, avgArrStr, fmtSec(avgWorkSec), grade);
+
+        const bg = pct >= 90 ? C.greenBg : pct >= 70 ? C.rowEven : lateCount >= 3 ? C.yellowBg : C.redBg;
+        const dataRow = sheet.addRow(rowValues);
+        dataRow.height = 20;
+
+        dataRow.eachCell((cell, ci) => {
+            const isDay = ci >= 2 && ci <= 1 + workDates.length;
+            const val   = String(cell.value || '');
+            let cellBg  = bg;
+            if (isDay) {
+                if (val.startsWith('✅')) cellBg = C.greenBg;
+                else if (val.startsWith('⚠️')) cellBg = C.yellowBg;
+                else if (val === '—') cellBg = C.redBg;
+                else if (val.includes('Отпуск') || val.includes('Больничный') || val.includes('Удалённо') || val.includes('Командировка') || val.includes('Выходной')) cellBg = C.schedBg;
+            }
+            styleCell(cell, { bg: cellBg, align: ci === 1 ? 'left' : 'center', size: 10 });
+        });
+
+        teamPresent += daysPresent;
+        teamLate    += lateCount;
+        if (arrivalCount > 0) { teamArrSec += arrivalSecSum / arrivalCount; teamArrCount++; }
+        teamStatsRows.push({ pct, grade });
+        rowIdx++;
+    }
+
+    // ── Строка 5 (сводка команды) — вставляем ПОСЛЕ заголовков ──
+    // Вставляем строку 5 перед данными (у нас строки 1–4 уже заполнены, данные с 5-й)
+    // Добавим её в самом конце как "Итого"
+    sheet.addRow([]); // разделитель
+    const teamRow = sheet.addRow([
+        '📊 ИТОГО ПО КОМАНДЕ',
+        ...workDates.map(() => ''),
+        teamPresent,
+        allEmps.length * workDaysCount,
+        allEmps.length > 0 ? `${Math.round(teamPresent / (allEmps.length * workDaysCount) * 100)}%` : '—',
+        teamLate,
+        teamArrCount > 0 ? (() => { const s = teamArrSec / teamArrCount; return `${String(Math.floor(s / 3600)).padStart(2,'0')}:${String(Math.floor((s % 3600) / 60)).padStart(2,'0')}`; })() : '—',
+        '—', '—',
+    ]);
+    teamRow.height = 22;
+    teamRow.eachCell((cell, ci) => {
+        styleCell(cell, { bold: true, bg: C.titleBg, color: C.titleText, align: ci === 1 ? 'left' : 'center', size: 11 });
+    });
+
+    return sheet;
+}
+
+// ─── Лист "Месяц" ─────────────────────────────────────────────────────────────
+// Полная статистика: явка, опоздания, часы, динамика по неделям
+async function buildMonthSheet(workbook, pool) {
+    const WORK_START_HOUR = 9;
+    const days     = 30;
+    const interval = '30 days';
+
+    // Все данные за месяц
+    const { rows: rawData } = await pool.query(`
+        SELECT
+            e.user_id, e.user_name,
+            (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date AS day,
+            MIN(CASE WHEN a.type='in'  THEN (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg') END) AS in_time,
+            MAX(CASE WHEN a.type='out' THEN (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg') END) AS out_time
+        FROM employees e
+        LEFT JOIN attendance a
+            ON a.user_id = e.user_id
+            AND a.timestamp >= NOW() - INTERVAL '${interval}'
+        GROUP BY e.user_id, e.user_name, day
+        ORDER BY e.user_name, day
+    `);
+
+    const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
+    const { rows: schedRows } = await pool.query(`
+        SELECT user_id, status, date_from, date_to
+        FROM schedules
+        WHERE date_from <= NOW() AND date_to >= NOW() - INTERVAL '${interval}'
+    `);
+
+    // Сборка данных
+    const empMap = {};
+    for (const e of allEmps) empMap[e.user_id] = { user_name: e.user_name, days: {} };
+    for (const r of rawData) {
+        if (!empMap[r.user_id]) continue;
+        const dStr = r.day ? new Date(r.day).toLocaleDateString('sv-SE') : null;
+        if (dStr) empMap[r.user_id].days[dStr] = { in: r.in_time, out: r.out_time };
+    }
+
+    // Расписание
+    const schedMap = {};
+    for (const s of schedRows) {
+        if (!schedMap[s.user_id]) schedMap[s.user_id] = {};
+        let d = new Date(s.date_from);
+        while (d <= new Date(s.date_to)) {
+            schedMap[s.user_id][d.toLocaleDateString('sv-SE')] = s.status;
+            d.setDate(d.getDate() + 1);
+        }
+    }
+
+    // Рабочие дни (пн–пт) за период
+    const allDates  = dateRange(days);
+    const workDates = allDates.filter(d => { const w = new Date(d).getDay(); return w >= 1 && w <= 5; });
+    const workDaysCount = workDates.length;
+
+    // Разбивка по неделям (для детализации)
+    const weeks = [];
+    for (let i = 0; i < workDates.length; i += 5) {
+        weeks.push(workDates.slice(i, i + 5));
+    }
+
+    // ── Создаём лист ──
+    const fromLabel = new Date(workDates[0]).toLocaleDateString('ru-RU');
+    const toLabel   = new Date(workDates[workDates.length - 1]).toLocaleDateString('ru-RU');
+    const sheetLabel = `Месяц (${workDaysCount} р.дн.)`;
+
+    const sheet = workbook.addWorksheet(sheetLabel, {
+        properties: { tabColor: { argb: 'FF3A7BD5' } },
+    });
+    sheet.views = [{ state: 'frozen', ySplit: 6 }];
+
+    // ── Заголовок ──
+    const TOTAL_COLS = 11;
+    sheet.mergeCells(`A1:K1`);
+    const titleCell = sheet.getCell('A1');
+    titleCell.value = `🗓 Месячный отчёт посещаемости — ${fromLabel} – ${toLabel}`;
+    styleCell(titleCell, { bold: true, bg: C.titleBg, color: C.titleText, align: 'center', size: 14 });
     sheet.getRow(1).height = 32;
     sheet.addRow([]);
 
-    const cols = [
-        { title: 'Сотрудник',          width: 28 },
-        { title: 'Дней присутствия',   width: 20 },
-        { title: `Из ${workDays} раб.`,width: 18 },
-        { title: '% явки',             width: 14 },
-        { title: 'Оценка',             width: 18 },
+    // ── Строка 3: группы столбцов ──
+    sheet.mergeCells('A3:A4');
+    styleCell(sheet.getCell('A3'), { bold: true, color: C.headerText, bg: C.headerBg, align: 'center', size: 11 });
+    sheet.getCell('A3').value = 'Сотрудник';
+
+    sheet.mergeCells('B3:E3');
+    styleCell(sheet.getCell('B3'), { bold: true, color: C.headerText, bg: 'FF3A7BD5', align: 'center', size: 11 });
+    sheet.getCell('B3').value = '📋 Посещаемость';
+
+    sheet.mergeCells('F3:I3');
+    styleCell(sheet.getCell('F3'), { bold: true, color: C.headerText, bg: 'FF5B8DEF', align: 'center', size: 11 });
+    sheet.getCell('F3').value = '⏱ Время работы';
+
+    sheet.mergeCells('J3:K3');
+    styleCell(sheet.getCell('J3'), { bold: true, color: C.headerText, bg: 'FF2D8CFF', align: 'center', size: 11 });
+    sheet.getCell('J3').value = '🏆 Итог';
+
+    // ── Строка 4: подзаголовки ──
+    const subHeaders = [
+        '', // A — уже смержена
+        'Явок', `Из ${workDaysCount}`, '% явки', 'Пропусков',
+        'Опозданий', 'Ср. приход', 'Ранний', 'Поздний',
+        'Итого часов', 'Оценка',
     ];
-    sheet.columns = cols.map(c => ({ width: c.width }));
-    addTableHeader(sheet, cols);
-
-    rows.forEach((r, i) => {
-        const d    = Number(r.days_present);
-        const pct  = Math.round((d / workDays) * 100);
-        const grade = pct >= 90 ? '✅ Отлично' : pct >= 70 ? '⚠️ Допустимо' : '❌ Нарушения';
-        const bg    = pct >= 90 ? C.greenBg   : pct >= 70 ? C.yellowBg    : C.redBg;
-
-        const row = sheet.addRow([r.user_name || r.user_id, d, workDays, `${pct}%`, grade]);
-        row.height = 20;
-        row.eachCell((cell, ci) => styleCell(cell, { bg, align: ci === 1 ? 'left' : 'center' }));
+    const subBgs = [
+        '', 'FF3A7BD5','FF3A7BD5','FF3A7BD5','FF3A7BD5',
+        'FF5B8DEF','FF5B8DEF','FF5B8DEF','FF5B8DEF',
+        'FF2D8CFF','FF2D8CFF',
+    ];
+    const r4 = sheet.getRow(4);
+    r4.height = 22;
+    subHeaders.forEach((h, i) => {
+        if (i === 0) return; // A уже смержена
+        const cell = r4.getCell(i + 1);
+        cell.value = h;
+        styleCell(cell, { bold: true, color: C.headerText, bg: subBgs[i], align: 'center', size: 10 });
     });
 
+    // ── Ширины ──
+    sheet.getColumn(1).width = 28;
+    [10, 10, 10, 12, 13, 14, 12, 12, 14, 20].forEach((w, i) => { sheet.getColumn(2 + i).width = w; });
+
+    sheet.addRow([]); // строка 5 — пустая перед данными
+
+    // ── Данные сотрудников ──
+    const SCHED_LABELS_M = { vacation: '🏖', sick: '🤒', dayoff: '📅', remote: '🏠', business: '✈️' };
+
+    let bestEmp = null, worstEmp = null;
+
+    for (const emp of allEmps) {
+        const uid   = emp.user_id;
+        const dData = empMap[uid]?.days || {};
+        const sched = schedMap[uid]  || {};
+
+        let daysPresent = 0, lateCount = 0, absCount = 0;
+        let totalWorkSec = 0, arrSecSum = 0, arrCount = 0;
+        let earliestSec = null, latestSec = null;
+        let schedDays = 0;
+
+        for (const d of workDates) {
+            const rec   = dData[d];
+            const schSt = sched[d];
+
+            if (schSt) {
+                schedDays++;
+            } else if (rec?.in) {
+                const inDt   = new Date(rec.in);
+                const inH    = inDt.getHours();
+                const inM    = inDt.getMinutes();
+                const arrSec = inH * 3600 + inM * 60;
+                const isLate = inH > WORK_START_HOUR || (inH === WORK_START_HOUR && inM > 10);
+
+                daysPresent++;
+                if (isLate) lateCount++;
+
+                arrSecSum += arrSec;
+                arrCount++;
+                if (earliestSec === null || arrSec < earliestSec) earliestSec = arrSec;
+                if (latestSec   === null || arrSec > latestSec)   latestSec   = arrSec;
+
+                if (rec.out) {
+                    totalWorkSec += Math.max(0, (new Date(rec.out) - inDt) / 1000);
+                }
+            } else {
+                absCount++;
+            }
+        }
+
+        const effectiveDays = workDaysCount - schedDays;
+        const pct = effectiveDays > 0 ? Math.round(daysPresent / effectiveDays * 100) : null;
+
+        const avgArr = arrCount > 0 ? arrSecSum / arrCount : null;
+        const fmtT   = (sec) => sec !== null
+            ? `${String(Math.floor(sec/3600)).padStart(2,'0')}:${String(Math.floor((sec%3600)/60)).padStart(2,'0')}`
+            : '—';
+
+        const avgWorkSec = daysPresent > 0 ? totalWorkSec / daysPresent : 0;
+        const totalHours = (totalWorkSec / 3600).toFixed(1);
+
+        let grade;
+        if (pct === null) {
+            const allSched = Object.values(sched);
+            grade = `${[...new Set(allSched.map(s => SCHED_LABELS_M[s] || s))].join(' ')} Весь период`;
+        } else if (pct >= 90 && lateCount === 0) grade = '✅ Отлично';
+        else if (pct >= 90)   grade = '✅ Хорошо';
+        else if (pct >= 80)   grade = lateCount >= 5 ? '⚠️ Опоздания' : '⚠️ Допустимо';
+        else if (pct >= 60)   grade = '⚠️ Нарушения';
+        else                   grade = '❌ Критично';
+
+        const bg = pct === null ? C.schedBg
+            : pct >= 90 ? (lateCount === 0 ? C.greenBg : C.rowEven)
+            : pct >= 70 ? C.yellowBg
+            : C.redBg;
+
+        const row = sheet.addRow([
+            emp.user_name,
+            pct !== null ? daysPresent : '—',
+            pct !== null ? effectiveDays : '—',
+            pct !== null ? `${pct}%` : '—',
+            pct !== null ? absCount : '—',
+            pct !== null ? lateCount : '—',
+            fmtT(avgArr),
+            fmtT(earliestSec),
+            fmtT(latestSec),
+            pct !== null ? `${totalHours} ч` : '—',
+            grade,
+        ]);
+        row.height = 20;
+        row.eachCell((cell, ci) => styleCell(cell, { bg, align: ci === 1 ? 'left' : 'center', size: 10 }));
+
+        if (pct !== null) {
+            if (!bestEmp  || pct > bestEmp.pct)  bestEmp  = { name: emp.user_name, pct };
+            if (!worstEmp || pct < worstEmp.pct) worstEmp = { name: emp.user_name, pct };
+        }
+    }
+
+    // ── Итоговая строка команды ──
+    sheet.addRow([]);
+    const sumRows = sheet._rows.filter(r => r && r.getCell(4).value && String(r.getCell(4).value).endsWith('%'));
+    const teamPcts = sumRows.map(r => parseInt(r.getCell(4).value));
+    const teamAvgPct = teamPcts.length ? Math.round(teamPcts.reduce((a, b) => a + b, 0) / teamPcts.length) : 0;
+    const teamRow = sheet.addRow([
+        '📊 ИТОГО ПО КОМАНДЕ', '', '', `${teamAvgPct}%`, '', '', '', '', '', '', `${bestEmp?.name || '—'} (лучший)`,
+    ]);
+    teamRow.height = 22;
+    teamRow.eachCell((cell, ci) => {
+        styleCell(cell, { bold: true, bg: C.titleBg, color: C.titleText, align: ci === 1 ? 'left' : 'center', size: 11 });
+    });
+
+    // ── Блок: детализация по неделям (новый раздел ниже) ──
+    sheet.addRow([]);
+    sheet.addRow([]);
+    const weekSectionTitle = sheet.addRow(['📆 Детализация по неделям', '', '', '', '', '', '', '', '', '', '']);
+    sheet.mergeCells(`A${weekSectionTitle.number}:K${weekSectionTitle.number}`);
+    styleCell(sheet.getCell(`A${weekSectionTitle.number}`), { bold: true, bg: C.titleBg, color: C.titleText, align: 'center', size: 12 });
+    weekSectionTitle.height = 26;
+
+    // Заголовки недельной детализации
+    const wkHeader = sheet.addRow(['Сотрудник', ...weeks.map((w, i) => {
+        const f = new Date(w[0]).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+        const t = new Date(w[w.length-1]).toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+        return `Нед.${i+1} ${f}–${t}`;
+    })]);
+    wkHeader.height = 20;
+    wkHeader.eachCell(cell => styleCell(cell, { bold: true, color: C.headerText, bg: 'FF3A7BD5', align: 'center', size: 10 }));
+    wkHeader.getCell(1).alignment = { horizontal: 'left', vertical: 'middle' };
+
+    // Данные по неделям
+    for (const emp of allEmps) {
+        const uid   = emp.user_id;
+        const dData = empMap[uid]?.days || {};
+        const sched = schedMap[uid]  || {};
+
+        const weekStats = weeks.map(wk => {
+            let p = 0, l = 0;
+            for (const d of wk) {
+                if (sched[d]) continue;
+                if (dData[d]?.in) {
+                    p++;
+                    const inDt = new Date(dData[d].in);
+                    const inH  = inDt.getHours();
+                    const inM  = inDt.getMinutes();
+                    if (inH > WORK_START_HOUR || (inH === WORK_START_HOUR && inM > 10)) l++;
+                }
+            }
+            const total = wk.filter(d => !sched[d]).length;
+            const pct   = total > 0 ? Math.round(p / total * 100) : null;
+            if (pct === null) return '—';
+            const lStr = l > 0 ? ` / ${l}⚠️` : '';
+            return `${p}/${total} (${pct}%${lStr})`;
+        });
+
+        const wkRow = sheet.addRow([emp.user_name, ...weekStats]);
+        wkRow.height = 18;
+        wkRow.eachCell((cell, ci) => {
+            const val = String(cell.value || '');
+            let bg = ci % 2 === 0 ? C.rowEven : C.rowOdd;
+            if (ci > 1) {
+                const m = val.match(/\((\d+)%/);
+                if (m) {
+                    const p = parseInt(m[1]);
+                    bg = p >= 90 ? C.greenBg : p >= 70 ? C.yellowBg : C.redBg;
+                }
+            }
+            styleCell(cell, { bg, align: ci === 1 ? 'left' : 'center', size: 10 });
+        });
+    }
+
+    return sheet;
+}
+
+// ─── Лист "Неделя / Месяц" (обёртка для совместимости) ───────────────────────
+async function buildPeriodSheet(workbook, pool, days) {
+    if (days === 7)  return buildWeekSheet(workbook, pool);
+    if (days === 30) return buildMonthSheet(workbook, pool);
+    // Fallback — старый лёгкий вариант
+    const label = `Период ${days} дн.`;
+    const sheet = workbook.addWorksheet(label);
+    sheet.addRow([`Отчёт за ${days} дней`]);
     return sheet;
 }
 
