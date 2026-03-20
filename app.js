@@ -694,6 +694,8 @@ else{navigator.geolocation.getCurrentPosition(
 }
 </script></body></html>`);
 });
+// В app.js — добавить одну строку
+app.get('/health', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
 app.post('/confirm-geo', async (req, res) => {
     const { token, lat, lon } = req.body;
