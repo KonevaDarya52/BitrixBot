@@ -4,8 +4,6 @@
 'use strict';
 
 const ExcelJS    = require('exceljs');
-const nodemailer = require('nodemailer');
-const dns        = require('dns').promises;
 const os         = require('os');
 const fs         = require('fs');
 const path       = require('path');
@@ -355,13 +353,14 @@ async function buildExcelReport(pool, period = 'today') {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-//  ОТПРАВКА EMAIL
+//  ОТПРАВКА EMAIL — через Brevo HTTP API (работает на Render.com)
+//  Render блокирует SMTP-порты, поэтому используем HTTPS-запрос к API Brevo
 // ═════════════════════════════════════════════════════════════════════════════
 async function sendReportByEmail(pool, period, config) {
-    const { smtpHost, smtpPort, smtpUser, smtpPass, reportEmail } = config;
+    const { smtpUser, brevoApiKey, reportEmail } = config;
 
-    if (!smtpUser || !smtpPass) {
-        return { ok: false, error: 'SMTP не настроен: нет SMTP_USER или SMTP_PASS' };
+    if (!brevoApiKey) {
+        return { ok: false, error: 'Не задан BREVO_API_KEY' };
     }
     if (!reportEmail) {
         return { ok: false, error: 'Не задан REPORT_EMAIL — куда отправлять?' };
@@ -370,54 +369,50 @@ async function sendReportByEmail(pool, period, config) {
     try {
         const { file, name, label } = await buildExcelReport(pool, period);
 
-        // Резолвим в IPv4 (важно для Render.com / Heroku — иначе ENETUNREACH через IPv6)
-        let smtpIp = smtpHost;
-        try {
-            const result = await dns.lookup(smtpHost, { family: 4 });
-            smtpIp = result.address;
-            console.log(`📧 SMTP: ${smtpHost} → ${smtpIp}:${smtpPort}`);
-        } catch (e) {
-            console.warn(`⚠️ DNS lookup failed (${e.message}), используем hostname`);
-        }
-
-        const transporter = nodemailer.createTransport({
-            host:              smtpIp,
-            port:              smtpPort,
-            secure:            smtpPort === 465,
-            auth:              { user: smtpUser, pass: smtpPass },
-            tls:               { rejectUnauthorized: false, servername: smtpHost },
-            connectionTimeout: 20000,
-            greetingTimeout:   15000,
-            socketTimeout:     30000,
-            family:            4,
-        });
+        // Читаем файл и кодируем в base64 для вложения
+        const fileBuffer  = fs.readFileSync(file);
+        const fileBase64  = fileBuffer.toString('base64');
 
         const dateRu = new Date().toLocaleDateString('ru-RU', { timeZone: 'Asia/Yekaterinburg' });
-        await transporter.sendMail({
-            from:    `"🤖 Учёт времени" <${smtpUser}>`,
-            to:      reportEmail,
-            subject: `📊 Отчёт посещаемости — ${label} — ${dateRu}`,
-            html: `
-                <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
-                    <div style="background:#2D8CFF;color:white;padding:20px;border-radius:8px 8px 0 0">
-                        <h2 style="margin:0">📊 Отчёт посещаемости</h2>
-                        <p style="margin:4px 0 0;opacity:.9">${label} · ${dateRu}</p>
-                    </div>
-                    <div style="background:#f9f9f9;padding:20px;border:1px solid #e0e0e0;border-radius:0 0 8px 8px">
-                        <p>Автоматический отчёт от бота учёта рабочего времени.</p>
-                        <p>Файл Excel с данными прикреплён к письму.</p>
-                        <p style="color:#888;font-size:12px;margin-top:20px">
-                            Отправлено: ${new Date().toLocaleString('ru-RU', { timeZone:'Asia/Yekaterinburg' })}
-                        </p>
-                    </div>
-                </div>`,
-            attachments: [{ filename: name, path: file }],
-        });
+        const senderEmail = smtpUser || 'bot@brevo.com';
+
+        // HTTP POST запрос к Brevo API — не использует SMTP-порты
+        const axios = require('axios');
+        const response = await axios.post(
+            'https://api.brevo.com/v3/smtp/email',
+            {
+                sender:  { name: '🤖 Учёт времени', email: senderEmail },
+                to:      [{ email: reportEmail }],
+                subject: `Отчёт посещаемости — ${label} — ${dateRu}`,
+                htmlContent: `
+                    <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
+                        <div style="background:#2D8CFF;color:white;padding:20px;border-radius:8px 8px 0 0">
+                            <h2 style="margin:0">Отчёт посещаемости</h2>
+                            <p style="margin:4px 0 0;opacity:.9">${label} · ${dateRu}</p>
+                        </div>
+                        <div style="background:#f9f9f9;padding:20px;border:1px solid #e0e0e0;border-radius:0 0 8px 8px">
+                            <p>Автоматический отчёт от бота учёта рабочего времени.</p>
+                            <p>Файл Excel с данными прикреплён к письму.</p>
+                            <p style="color:#888;font-size:12px;margin-top:20px">
+                                Отправлено: ${new Date().toLocaleString('ru-RU', { timeZone:'Asia/Yekaterinburg' })}
+                            </p>
+                        </div>
+                    </div>`,
+                attachment: [{ content: fileBase64, name }],
+            },
+            {
+                headers: {
+                    'api-key':      brevoApiKey,
+                    'Content-Type': 'application/json',
+                },
+                timeout: 30000,
+            }
+        );
 
         // Удаляем временный файл
         try { fs.unlinkSync(file); } catch (_) {}
 
-        console.log(`✅ Отчёт "${label}" отправлен на ${reportEmail}`);
+        console.log(`✅ Отчёт "${label}" отправлен на ${reportEmail} (Brevo API, статус ${response.status})`);
         return { ok: true, label, email: reportEmail };
 
     } catch (err) {
