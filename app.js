@@ -21,10 +21,7 @@ const OFFICE2_LON   = process.env.OFFICE2_LON ? parseFloat(process.env.OFFICE2_L
 const OFFICE2_NAME  = process.env.OFFICE2_NAME || 'Филиал';
 const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
 const smtpConfig = {
-    smtpHost:    process.env.SMTP_HOST   || 'smtp-relay.brevo.com',
-    smtpPort:    parseInt(process.env.SMTP_PORT || '587'),
     smtpUser:    process.env.SMTP_USER   || '',
-    smtpPass:    process.env.SMTP_PASS   || '',
     brevoApiKey: process.env.BREVO_API_KEY || '',
     reportEmail: process.env.REPORT_EMAIL || '',
 };
