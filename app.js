@@ -977,14 +977,12 @@ if (sched && sched.status === 'remote') {
             if (present.length) {
                 text += `✅ Явились (${present.length} чел.):\n`;
                 present.forEach(r => {
-                    const isRemote = !r.in_time || (r.in_time && r.in_office === 0);
+    const locationLabel = r.in_office === 1 ? '🏢 в офисе' : '🏠 удалённо';
 
-                    text += `• ${r.user_name||r.user_id}: ${
-    isRemote
-        ? '🏠 удалённо'
-        : `${r.in_time ? tzTime(r.in_time) : '?'} → ${r.out_time ? tzTime(r.out_time) : '🟢 в офисе'}`
-}\n`;
-                });
+    text += `• ${r.user_name || r.user_id}: ${locationLabel} ${
+        r.in_time ? tzTime(r.in_time) : '?'
+    } → ${r.out_time ? tzTime(r.out_time) : '🟢 работает'}\n`;
+});
             } else { text += `Сегодня отметок нет.\n`; }
             if (schedToday.length) {
                 text += `\n📅 По расписанию:\n`;
