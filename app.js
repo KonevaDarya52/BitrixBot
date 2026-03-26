@@ -462,11 +462,12 @@ async function getPortal(domain) {
     return rows[0] || null;
 }
 
-async function saveAttendance(userId, userName, domain, type, lat, lon, inOffice) {
+async function saveAttendance(userId, userName, domain, type, lat, lon, inOffice, isRemote = false) {
     const { rows } = await pool.query(
         `INSERT INTO attendance (user_id,user_name,domain,type,latitude,longitude,in_office)
          VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-        [userId, userName, domain, type, lat, lon, inOffice ? 1 : 0]);
+        [userId, userName, domain, type, lat, lon, isRemote ? 0 : (inOffice ? 1 : 0)]
+    );
     return rows[0].id;
 }
 
@@ -701,10 +702,12 @@ app.post('/confirm-geo', async (req, res) => {
     const rec = await popGeoToken(token);
     if (!rec) return res.json({ ok:false, error:'Ссылка устарела или уже использована. Запроси новую в боте!' });
 
+    const sched = await getActiveSchedule(rec.user_id);
+const isRemote = sched && sched.status === 'remote';
     const { inOffice, officeName } = checkOffice(lat, lon);
     const kb       = (await isAdmin(rec.user_id)) ? kbAdmin() : kbMain();
 
-    if (!inOffice) {
+    if (!inOffice && !isRemote) {
         const hint = OFFICE2_LAT !== null
             ? `У вас два офиса — проверьте, что вы рядом с одним из них.`
             : `Подойдите ближе к зданию и попробуйте снова 🏢`;
@@ -715,7 +718,7 @@ app.post('/confirm-geo', async (req, res) => {
     }
 
     const time = new Date().toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' });
-    await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, true);
+    await saveAttendance(rec.user_id, rec.user_name, rec.domain, rec.type, lat, lon, inOffice, isRemote);
 
     let text;
     if (rec.type === 'in') {
@@ -857,6 +860,23 @@ app.post('/imbot', async (req, res) => {
                 return;
             }
             const sched = await getActiveSchedule(FROM_USER_ID);
+
+            // ✅ ЕСЛИ УДАЛЁНКА — БЕЗ ГЕОЛОКАЦИИ
+if (sched && sched.status === 'remote') {
+    await saveAttendance(FROM_USER_ID, resolvedName, domain, 'in', null, null, false, true);
+
+    const time = new Date().toLocaleTimeString('ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'Asia/Yekaterinburg'
+    });
+
+    await sendMessage(domain, authToken, botId, DIALOG_ID,
+        `🏠 Начало работы (удалённо) в ${time}\n\nХорошего дня 💻`, kb);
+
+    return;
+}
+
             if (sched && ['vacation','sick','dayoff'].includes(sched.status)) {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
                     `ℹ️ По расписанию у вас сегодня: ${SCHED_LABELS[sched.status]}\nЕсли всё верно — ссылка для отметки ниже 👇`, null);
@@ -869,6 +889,22 @@ app.post('/imbot', async (req, res) => {
 
         } else if (action === 'left' || action === 'ушел' || action === 'ушёл') {
             const lastMark = await getLastMark(FROM_USER_ID);
+            const sched = await getActiveSchedule(FROM_USER_ID);
+
+if (sched && sched.status === 'remote') {
+    await saveAttendance(FROM_USER_ID, resolvedName, domain, 'out', null, null, false, true);
+
+    const time = new Date().toLocaleTimeString('ru-RU', {
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'Asia/Yekaterinburg'
+    });
+
+    await sendMessage(domain, authToken, botId, DIALOG_ID,
+        `🏠 Завершение работы (удалённо) в ${time}`, kb);
+
+    return;
+}
             if (!lastMark || lastMark.type !== 'in') {
                 await sendMessage(domain, authToken, botId, DIALOG_ID,
                     `⚠️ Нет активной отметки прихода!\nСначала нажми "✅ Пришёл", чтобы начать рабочий день.`, kb);
@@ -941,7 +977,13 @@ app.post('/imbot', async (req, res) => {
             if (present.length) {
                 text += `✅ Явились (${present.length} чел.):\n`;
                 present.forEach(r => {
-                    text += `• ${r.user_name||r.user_id}: ${r.in_time ? tzTime(r.in_time) : '?'} → ${r.out_time ? tzTime(r.out_time) : '🟢 в офисе'}\n`;
+                    const isRemote = !r.in_time || (r.in_time && r.in_office === 0);
+
+                    text += `• ${r.user_name||r.user_id}: ${
+    isRemote
+        ? '🏠 удалённо'
+        : `${r.in_time ? tzTime(r.in_time) : '?'} → ${r.out_time ? tzTime(r.out_time) : '🟢 в офисе'}`
+}\n`;
                 });
             } else { text += `Сегодня отметок нет.\n`; }
             if (schedToday.length) {
