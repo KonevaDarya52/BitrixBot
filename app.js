@@ -101,6 +101,30 @@ function formatDuration(seconds) {
     return `${h} ч ${m} мин`;
 }
 
+async function getMonthWorkSeconds(userId) {
+    const { rows } = await pool.query(`
+        SELECT type, timestamp
+        FROM attendance
+        WHERE user_id = $1
+          AND date_trunc('month', timestamp) = date_trunc('month', NOW())
+        ORDER BY timestamp
+    `, [userId]);
+
+    let total = 0;
+    let lastIn = null;
+
+    for (const r of rows) {
+        if (r.type === 'in') {
+            lastIn = new Date(r.timestamp);
+        } else if (r.type === 'out' && lastIn) {
+            total += (new Date(r.timestamp) - lastIn) / 1000;
+            lastIn = null;
+        }
+    }
+
+    return total;
+}
+
 function tzTime(ts) {
     return new Date(ts).toLocaleTimeString('ru-RU', { hour:'2-digit', minute:'2-digit', timeZone:'Asia/Yekaterinburg' });
 }
@@ -945,7 +969,17 @@ if (sched && sched.status === 'remote') {
             }
             if (lastType === 'in') lines.push('⏳ Смена ещё не закрыта');
             const totalStr = totalSeconds > 0 ? `\n\n⏱ Итого в офисе: ${formatDuration(totalSeconds)}` : '';
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Твои отметки за сегодня:\n\n${lines.join('\n')}${totalStr}`, kb);
+            const monthSeconds = await getMonthWorkSeconds(FROM_USER_ID);
+const monthHours = Math.floor(monthSeconds / 3600);
+
+const norm = 160;
+const left = Math.max(0, norm - monthHours);
+
+const progressText =
+    `\n\n📅 За месяц:\n` +
+    `⏱ Отработано: ${monthHours} ч\n` +
+    `📊 Осталось: ${left} ч до нормы`;
+            await sendMessage(domain, authToken, botId, DIALOG_ID, `📊 Твои отметки за сегодня:\n\n${lines.join('\n')}${totalStr}${progressText}`, kb);
 
         } else if (action === 'help' || action === 'помощь') {
             await sendMessage(domain, authToken, botId, DIALOG_ID,
