@@ -260,21 +260,67 @@ async function getEmployeeDialogId(userId) {
 async function syncAllEmployees(domain, accessToken) {
     try {
         let start = 0, total = 0;
+        const allUsers = [];
         do {
             const resp = await callBitrix(domain, accessToken, 'user.get', { ACTIVE: true, start });
             if (!resp?.result?.length) break;
             for (const u of resp.result) {
                 const name = `${u.NAME || ''} ${u.LAST_NAME || ''}`.trim();
-                if (name) await registerEmployee(String(u.ID), name, domain, null);
+                if (name) {
+                    await registerEmployee(String(u.ID), name, domain, null);
+                    allUsers.push({ id: String(u.ID), name });
+                }
             }
             total = resp.total || 0;
             start += resp.result.length;
         } while (start < total);
         console.log(`✅ Синхронизировано сотрудников: ${start}`);
+
+        // Открываем чат бота с теми, у кого ещё нет dialog_id
+        const portal = await getPortal(domain);
+        if (portal?.bot_id) {
+            const { rows: noDialog } = await pool.query(
+                `SELECT user_id FROM employees WHERE domain=$1 AND dialog_id IS NULL`, [domain]);
+            for (const row of noDialog) {
+                await openBotChatForUser(domain, accessToken, portal.bot_id, row.user_id);
+                // небольшая пауза чтобы не перегружать API Битрикс24
+                await new Promise(r => setTimeout(r, 300));
+            }
+            console.log(`📣 Попытка открыть чат для ${noDialog.length} сотрудников без dialog_id`);
+        }
         return start;
     } catch (err) {
         console.error('❌ syncAllEmployees:', err.message);
         return 0;
+    }
+}
+
+// Открывает личный чат бота с пользователем и сохраняет dialog_id.
+// Bitrix24: imbot.chat.add создаёт чат между ботом и пользователем;
+// если чат уже существует — возвращает его ID.
+async function openBotChatForUser(domain, accessToken, botId, userId) {
+    try {
+        const resp = await callBitrix(domain, accessToken, 'imbot.chat.add', {
+            BOT_ID:   botId,
+            TITLE:    '',
+            USERS:    [Number(userId)],
+        });
+        // Битрикс возвращает chatId; dialog_id для личного чата = 'chat' + chatId
+        const chatId = resp?.result;
+        if (chatId) {
+            const dialogId = `chat${chatId}`;
+            await pool.query(
+                `UPDATE employees SET dialog_id=$1 WHERE user_id=$2 AND dialog_id IS NULL`,
+                [dialogId, String(userId)]);
+            console.log(`✅ openBotChat user=${userId} → dialog=${dialogId}`);
+            return dialogId;
+        } else {
+            console.warn(`⚠️ openBotChat user=${userId}: нет chatId в ответе`, JSON.stringify(resp));
+            return null;
+        }
+    } catch (err) {
+        console.error(`❌ openBotChatForUser user=${userId}:`, err.message);
+        return null;
     }
 }
 
@@ -555,11 +601,17 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
 }
 
 // Уведомление сотруднику в его личный чат с ботом.
-// dialog_id берём из таблицы employees — он сохраняется при первом открытии чата.
+// Если dialog_id ещё не известен — пытаемся открыть чат через imbot.chat.add.
 async function notifyUserInBotChat(domain, accessToken, botId, targetUserId, message) {
-    const dialogId = await getEmployeeDialogId(targetUserId);
+    let dialogId = await getEmployeeDialogId(targetUserId);
+
     if (!dialogId) {
-        console.warn(`⚠️ notifyUser: нет dialog_id для user ${targetUserId} — сотрудник ещё не открывал чат с ботом`);
+        console.log(`🔄 notifyUser: нет dialog_id для user ${targetUserId}, пробуем открыть чат...`);
+        dialogId = await openBotChatForUser(domain, accessToken, botId, targetUserId);
+    }
+
+    if (!dialogId) {
+        console.warn(`⚠️ notifyUser: не удалось получить dialog_id для user ${targetUserId}`);
         return null;
     }
     console.log(`📣 notifyUser → userId=${targetUserId}, dialog=${dialogId}`);
@@ -1340,9 +1392,23 @@ cron.schedule('*/15 * * * *', async () => {
     console.log('🧹 Очистка');
 });
 
+// Ежедневная синхронизация сотрудников из Битрикс24 (каждый день в 07:00 по Екатеринбургу = 02:00 UTC)
+cron.schedule('0 2 * * *', async () => {
+    console.log('🔄 [cron] Авто-синхронизация сотрудников...');
+    try {
+        const { rows: portals } = await pool.query(`SELECT domain, access_token FROM portals`);
+        for (const p of portals) {
+            const count = await syncAllEmployees(p.domain, p.access_token);
+            console.log(`✅ [cron] ${p.domain}: синхронизировано ${count} сотрудников`);
+        }
+    } catch (err) {
+        console.error('❌ [cron] Ошибка авто-синхронизации:', err.message);
+    }
+});
+
 // ─── Запуск ───────────────────────────────────────────────────────────────────
 
-initDB().then(() => {
+initDB().then(async () => {
     app.listen(port, '0.0.0.0', () => {
         console.log(`🚀 https://${APP_DOMAIN}`);
         console.log(`📍 Офис 1: ${OFFICE_LAT}, ${OFFICE_LON} (${OFFICE_RADIUS}м)`);
@@ -1352,6 +1418,19 @@ initDB().then(() => {
         console.log('=== ✅ READY ===');
     });
     reports.scheduleCronReports(pool, smtpConfig);
+
+    // Первичная синхронизация сотрудников при старте (через 5 сек, чтобы сервер успел поднятья)
+    setTimeout(async () => {
+        console.log('🔄 [startup] Первичная синхронизация сотрудников...');
+        try {
+            const { rows: portals } = await pool.query(`SELECT domain, access_token FROM portals`);
+            for (const p of portals) {
+                await syncAllEmployees(p.domain, p.access_token);
+            }
+        } catch (err) {
+            console.error('❌ [startup] syncAllEmployees:', err.message);
+        }
+    }, 5000);
 }).catch(err => {
     console.error('❌ БД:', err.message);
     process.exit(1);
