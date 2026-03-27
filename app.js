@@ -57,15 +57,10 @@ async function initDB() {
         data JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW())`);
     await pool.query(`CREATE TABLE IF NOT EXISTS employees (
         user_id TEXT PRIMARY KEY, user_name TEXT NOT NULL, domain TEXT,
-        chat_id TEXT,
-        department TEXT, email TEXT, is_active BOOLEAN DEFAULT TRUE,
+        dialog_id TEXT,
         first_seen TIMESTAMPTZ DEFAULT NOW(), last_seen TIMESTAMPTZ DEFAULT NOW())`);
-    // Миграция для существующих БД
-    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS chat_id TEXT`);
-    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS department TEXT`);
-    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS email TEXT`);
-    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`);
-    await pool.query(`ALTER TABLE employees DROP COLUMN IF EXISTS dialog_id`);
+    // Добавляем колонку dialog_id если её нет (для существующих БД)
+    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS dialog_id TEXT`);
     console.log('✅ БД инициализирована');
 }
 
@@ -245,118 +240,38 @@ async function getSchedulesToday() {
 
 // ─── Реестр сотрудников ───────────────────────────────────────────────────────
 
-// Сохраняет/обновляет сотрудника в локальной БД.
-// chat_id — ID чата бота с пользователем (получается через imbot.chat.add).
-// Не перезаписывает chat_id если он уже есть.
-async function registerEmployee(userId, userName, domain, { chatId = null, department = null, email = null, isActive = true } = {}) {
+// dialog_id сохраняем чтобы потом слать уведомления в чат бота
+async function registerEmployee(userId, userName, domain, dialogId) {
     await pool.query(
-        `INSERT INTO employees (user_id, user_name, domain, chat_id, department, email, is_active, first_seen, last_seen)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW())
+        `INSERT INTO employees (user_id, user_name, domain, dialog_id, first_seen, last_seen)
+         VALUES ($1,$2,$3,$4,NOW(),NOW())
          ON CONFLICT (user_id) DO UPDATE SET
              user_name  = EXCLUDED.user_name,
-             chat_id    = COALESCE(employees.chat_id, EXCLUDED.chat_id),
-             department = COALESCE(EXCLUDED.department, employees.department),
-             email      = COALESCE(EXCLUDED.email, employees.email),
-             is_active  = EXCLUDED.is_active,
+             dialog_id  = COALESCE(EXCLUDED.dialog_id, employees.dialog_id),
              last_seen  = NOW()`,
-        [String(userId), userName, domain, chatId, department, email, isActive]);
+        [String(userId), userName, domain, dialogId || null]);
 }
 
-// Сохраняет chat_id для сотрудника (вызывается после imbot.chat.add)
-async function saveEmployeeChatId(userId, chatId) {
-    await pool.query(
-        `UPDATE employees SET chat_id=$1 WHERE user_id=$2 AND chat_id IS NULL`,
-        [String(chatId), String(userId)]);
+async function getEmployeeDialogId(userId) {
+    const { rows } = await pool.query(`SELECT dialog_id FROM employees WHERE user_id=$1`, [String(userId)]);
+    return rows[0]?.dialog_id || null;
 }
 
-// Возвращает chat_id сотрудника из БД
-async function getEmployeeChatId(userId) {
-    const { rows } = await pool.query(`SELECT chat_id FROM employees WHERE user_id=$1`, [String(userId)]);
-    return rows[0]?.chat_id || null;
-}
-
-// Открывает чат бота с пользователем через imbot.chat.add.
-// Чат появляется в списке чатов пользователя сразу, без его участия.
-// Если чат уже существует — Битрикс вернёт существующий chat_id.
-async function openBotChat(domain, accessToken, botId, userId) {
-    try {
-        const resp = await callBitrix(domain, accessToken, 'imbot.chat.add', {
-            BOT_ID: botId,
-            TITLE:  '',
-            USERS:  [Number(userId)],
-        });
-        const chatId = resp?.result ? String(resp.result) : null;
-        if (chatId) {
-            await saveEmployeeChatId(userId, chatId);
-            console.log(`✅ openBotChat user=${userId} → chatId=${chatId}`);
-        } else {
-            console.warn(`⚠️ openBotChat user=${userId}: нет chatId`, JSON.stringify(resp));
-        }
-        return chatId;
-    } catch (err) {
-        console.error(`❌ openBotChat user=${userId}:`, err.message);
-        return null;
-    }
-}
-
-// Синхронизирует всех активных сотрудников из Битрикс24 в локальную БД.
-// Для каждого сотрудника без chat_id — открывает чат через imbot.chat.add,
-// чтобы бот появился в списке чатов пользователя без его участия.
 async function syncAllEmployees(domain, accessToken) {
     try {
-        const portal = await getPortal(domain);
-        const botId  = portal?.bot_id || null;
-
         let start = 0, total = 0;
-        const syncedIds = new Set();
-
         do {
-            const resp = await callBitrix(domain, accessToken, 'user.get', {
-                ACTIVE: true, start,
-                SELECT: ['ID', 'NAME', 'LAST_NAME', 'EMAIL', 'UF_DEPARTMENT'],
-            });
+            const resp = await callBitrix(domain, accessToken, 'user.get', { ACTIVE: true, start });
             if (!resp?.result?.length) break;
-
             for (const u of resp.result) {
                 const name = `${u.NAME || ''} ${u.LAST_NAME || ''}`.trim();
-                if (!name) continue;
-                const userId = String(u.ID);
-                syncedIds.add(userId);
-                await registerEmployee(userId, name, domain, {
-                    department: u.UF_DEPARTMENT ? String(u.UF_DEPARTMENT) : null,
-                    email:      u.EMAIL || null,
-                    isActive:   true,
-                });
+                if (name) await registerEmployee(String(u.ID), name, domain, null);
             }
             total = resp.total || 0;
             start += resp.result.length;
         } while (start < total);
-
-        // Помечаем уволенных/отключённых
-        if (syncedIds.size > 0) {
-            await pool.query(
-                `UPDATE employees SET is_active=FALSE
-                  WHERE domain=$1 AND user_id != ALL($2::text[]) AND is_active=TRUE`,
-                [domain, Array.from(syncedIds)]
-            );
-        }
-
-        // Открываем чат бота для всех у кого его ещё нет
-        // (бот появится в списке чатов пользователя автоматически)
-        if (botId) {
-            const { rows: noChatUsers } = await pool.query(
-                `SELECT user_id FROM employees WHERE domain=$1 AND chat_id IS NULL AND is_active=TRUE`,
-                [domain]
-            );
-            console.log(`🔄 Открываем чат для ${noChatUsers.length} сотрудников без chat_id...`);
-            for (const row of noChatUsers) {
-                await openBotChat(domain, accessToken, botId, row.user_id);
-                await new Promise(r => setTimeout(r, 200)); // пауза чтобы не перегружать API
-            }
-        }
-
-        console.log(`✅ Синхронизировано сотрудников: ${syncedIds.size}`);
-        return syncedIds.size;
+        console.log(`✅ Синхронизировано сотрудников: ${start}`);
+        return start;
     } catch (err) {
         console.error('❌ syncAllEmployees:', err.message);
         return 0;
@@ -639,29 +554,16 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
     return r;
 }
 
-// Отправляет уведомление сотруднику в чат бота.
-// Берёт chat_id из БД. Если его нет — сначала открывает чат через imbot.chat.add
-// (бот появится в списке чатов пользователя), затем отправляет сообщение.
+// Уведомление сотруднику в его личный чат с ботом.
+// dialog_id берём из таблицы employees — он сохраняется при первом открытии чата.
 async function notifyUserInBotChat(domain, accessToken, botId, targetUserId, message) {
-    let chatId = await getEmployeeChatId(targetUserId);
-
-    if (!chatId) {
-        console.log(`🔄 notifyUser: нет chat_id для user=${targetUserId}, открываем чат...`);
-        chatId = await openBotChat(domain, accessToken, botId, targetUserId);
-    }
-
-    if (!chatId) {
-        console.warn(`⚠️ notifyUser: не удалось получить chat_id для user=${targetUserId}`);
+    const dialogId = await getEmployeeDialogId(targetUserId);
+    if (!dialogId) {
+        console.warn(`⚠️ notifyUser: нет dialog_id для user ${targetUserId} — сотрудник ещё не открывал чат с ботом`);
         return null;
     }
-
-    const dialogId = `chat${chatId}`;
-    console.log(`📣 notifyUser → userId=${targetUserId}, chatId=${chatId}, dialog=${dialogId}`);
-    const r = await sendMessage(domain, accessToken, botId, dialogId, message, null);
-    if (!r || r.result === false) {
-        console.warn(`⚠️ notifyUser: ошибка отправки user=${targetUserId}`, JSON.stringify(r));
-    }
-    return r;
+    console.log(`📣 notifyUser → userId=${targetUserId}, dialog=${dialogId}`);
+    return sendMessage(domain, accessToken, botId, dialogId, message, null);
 }
 
 // ─── Регистрация команд ───────────────────────────────────────────────────────
@@ -758,10 +660,6 @@ app.post('/install', async (req, res) => {
             const botId = await registerBot(domain, AUTH_ID, null);
             if (botId) await savePortal(domain, AUTH_ID, REFRESH_ID, botId, ENDPOINT);
         }
-
-        // Синхронизируем всех сотрудников сразу после установки
-        setImmediate(() => syncAllEmployees(domain, AUTH_ID).catch(e =>
-            console.error('❌ install sync:', e.message)));
     }
 
     res.send(`<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
@@ -915,21 +813,15 @@ app.post('/imbot', async (req, res) => {
             if (b24user?.name) resolvedName = b24user.name;
         }
 
-        // Регистрируем/обновляем сотрудника в локальной БД
-        if (FROM_USER_ID && resolvedName) {
-            await registerEmployee(FROM_USER_ID, resolvedName, domain);
+        // Регистрируем сотрудника + сохраняем dialog_id для будущих уведомлений
+        if (FROM_USER_ID && resolvedName && DIALOG_ID) {
+            await registerEmployee(FROM_USER_ID, resolvedName, domain, DIALOG_ID);
         }
 
         const userIsAdmin = await isAdmin(FROM_USER_ID);
         const pending     = await getPending(FROM_USER_ID);
         const inAdminMode = userIsAdmin && (pending?.action === 'admin_session');
         const kb = inAdminMode ? kbAdmin() : await mainKb(FROM_USER_ID);
-
-        // Сохраняем chat_id при первом открытии чата пользователем
-        if (FROM_USER_ID && DIALOG_ID) {
-            const rawChatId = String(DIALOG_ID).replace(/^chat/, '');
-            if (/^d+$/.test(rawChatId)) await saveEmployeeChatId(FROM_USER_ID, rawChatId);
-        }
 
         if (event === 'ONIMBOTJOINCHAT') {
             const marked = await hasMarkedToday(FROM_USER_ID);
@@ -1384,7 +1276,7 @@ app.get('/debug', async (req, res) => {
     const portal = await getPortal(domain);
     const { rows: admins }    = await pool.query(`SELECT user_id, user_name, added_at FROM admins`);
     const { rows: schedules } = await pool.query(`SELECT * FROM schedules WHERE date_to>=CURRENT_DATE ORDER BY date_from`);
-    const { rows: employees } = await pool.query(`SELECT user_id, user_name, chat_id, department, is_active, last_seen FROM employees ORDER BY user_name`);
+    const { rows: employees } = await pool.query(`SELECT user_id, user_name, dialog_id, last_seen FROM employees ORDER BY user_name`);
     res.json({ domain, portal_in_db:!!portal,
         data: portal ? { bot_id:portal.bot_id, token:portal.access_token?.slice(0,12)+'...', updated:portal.updated_at } : null,
         admins, active_schedules:schedules, employees });
@@ -1424,7 +1316,7 @@ app.get('/test-bot', async (req, res) => {
     const profile   = await callBitrix(domain, portal.access_token, 'profile', {});
     const bots      = await callBitrix(domain, portal.access_token, 'imbot.bot.list', {});
     const { rows: admins }    = await pool.query(`SELECT user_id, user_name FROM admins`);
-    const { rows: employees } = await pool.query(`SELECT user_id, user_name, chat_id, department, email, is_active FROM employees ORDER BY user_name`);
+    const { rows: employees } = await pool.query(`SELECT user_id, user_name, dialog_id FROM employees ORDER BY user_name`);
     res.json({ bot_id:portal.bot_id,
         profile_check: profile?.result ? `✅ ${profile.result.NAME} ${profile.result.LAST_NAME}` : '❌',
         bots_in_b24: bots?.result||null, admins_in_db:admins, employees_in_db:employees,
@@ -1436,7 +1328,7 @@ app.get('/sync-employees', async (req, res) => {
     const portal = await getPortal(domain);
     if (!portal) return res.json({ ok:false, error:'Портал не найден.' });
     const count = await syncAllEmployees(domain, portal.access_token);
-    const { rows } = await pool.query(`SELECT user_id, user_name, department, email, is_active FROM employees ORDER BY user_name`);
+    const { rows } = await pool.query(`SELECT user_id, user_name, dialog_id FROM employees ORDER BY user_name`);
     res.json({ ok:true, synced:count, employees:rows });
 });
 
@@ -1446,18 +1338,6 @@ cron.schedule('*/15 * * * *', async () => {
     await pool.query(`DELETE FROM geo_tokens WHERE created_at < NOW()-INTERVAL '15 minutes'`);
     await pool.query(`DELETE FROM pending_input WHERE action != 'admin_session' AND created_at < NOW()-INTERVAL '30 minutes'`);
     console.log('🧹 Очистка');
-});
-
-// Ежедневная синхронизация сотрудников (07:00 Екатеринбург = 02:00 UTC)
-cron.schedule('0 2 * * *', async () => {
-    console.log('🔄 [cron] Синхронизация сотрудников...');
-    try {
-        const { rows: portals } = await pool.query(`SELECT domain, access_token FROM portals`);
-        for (const p of portals) {
-            const n = await syncAllEmployees(p.domain, p.access_token);
-            console.log(`✅ [cron] ${p.domain}: ${n} сотрудников`);
-        }
-    } catch (e) { console.error('❌ [cron] sync:', e.message); }
 });
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
@@ -1472,14 +1352,6 @@ initDB().then(() => {
         console.log('=== ✅ READY ===');
     });
     reports.scheduleCronReports(pool, smtpConfig);
-
-    // Синхронизация сотрудников при старте (через 5 сек после поднятия)
-    setTimeout(async () => {
-        try {
-            const { rows: portals } = await pool.query(`SELECT domain, access_token FROM portals`);
-            for (const p of portals) await syncAllEmployees(p.domain, p.access_token);
-        } catch (e) { console.error('❌ [startup] sync:', e.message); }
-    }, 5000);
 }).catch(err => {
     console.error('❌ БД:', err.message);
     process.exit(1);
