@@ -57,11 +57,13 @@ async function initDB() {
         data JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW())`);
     await pool.query(`CREATE TABLE IF NOT EXISTS employees (
         user_id TEXT PRIMARY KEY, user_name TEXT NOT NULL, domain TEXT,
-        dialog_id TEXT, greeted BOOLEAN DEFAULT FALSE,
+        department TEXT, email TEXT, is_active BOOLEAN DEFAULT TRUE,
         first_seen TIMESTAMPTZ DEFAULT NOW(), last_seen TIMESTAMPTZ DEFAULT NOW())`);
-    // Добавляем колонки если их нет (для существующих БД)
-    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS dialog_id TEXT`);
-    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS greeted BOOLEAN DEFAULT FALSE`);
+    // Миграция для существующих БД
+    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS department TEXT`);
+    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS email TEXT`);
+    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`);
+    await pool.query(`ALTER TABLE employees DROP COLUMN IF EXISTS dialog_id`);
     console.log('✅ БД инициализирована');
 }
 
@@ -241,84 +243,66 @@ async function getSchedulesToday() {
 
 // ─── Реестр сотрудников ───────────────────────────────────────────────────────
 
-// Возвращает true если сотрудник только что добавлен (новый), false если уже был
-async function registerEmployee(userId, userName, domain, dialogId) {
-    const res = await pool.query(
-        `INSERT INTO employees (user_id, user_name, domain, dialog_id, greeted, first_seen, last_seen)
-         VALUES ($1,$2,$3,$4,FALSE,NOW(),NOW())
+// Сохраняет/обновляет сотрудника в локальной БД.
+// Уведомления через DIALOG_ID='u<userId>' — не требуют хранения dialog_id.
+async function registerEmployee(userId, userName, domain, { department = null, email = null, isActive = true } = {}) {
+    await pool.query(
+        `INSERT INTO employees (user_id, user_name, domain, department, email, is_active, first_seen, last_seen)
+         VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
          ON CONFLICT (user_id) DO UPDATE SET
              user_name  = EXCLUDED.user_name,
-             dialog_id  = COALESCE(EXCLUDED.dialog_id, employees.dialog_id),
-             last_seen  = NOW()
-         RETURNING (xmax = 0) AS inserted`,
-        [String(userId), userName, domain, dialogId || null]);
-    return res.rows[0]?.inserted === true;
+             department = COALESCE(EXCLUDED.department, employees.department),
+             email      = COALESCE(EXCLUDED.email, employees.email),
+             is_active  = EXCLUDED.is_active,
+             last_seen  = NOW()`,
+        [String(userId), userName, domain, department, email, isActive]);
 }
 
-async function getEmployeeDialogId(userId) {
-    const { rows } = await pool.query(`SELECT dialog_id FROM employees WHERE user_id=$1`, [String(userId)]);
-    return rows[0]?.dialog_id || null;
-}
-
+// Синхронизирует всех активных сотрудников из Битрикс24 в локальную БД.
+// После синхронизации уведомления возможны любому через DIALOG_ID='u<userId>'.
 async function syncAllEmployees(domain, accessToken) {
     try {
         let start = 0, total = 0;
-        const newEmployees = [];
+        const syncedIds = new Set();
+
         do {
-            const resp = await callBitrix(domain, accessToken, 'user.get', { ACTIVE: true, start });
+            const resp = await callBitrix(domain, accessToken, 'user.get', {
+                ACTIVE: true, start,
+                SELECT: ['ID', 'NAME', 'LAST_NAME', 'EMAIL', 'UF_DEPARTMENT'],
+            });
             if (!resp?.result?.length) break;
+
             for (const u of resp.result) {
                 const name = `${u.NAME || ''} ${u.LAST_NAME || ''}`.trim();
-                if (name) {
-                    const isNew = await registerEmployee(String(u.ID), name, domain, null);
-                    if (isNew) newEmployees.push({ id: String(u.ID), name });
-                }
+                if (!name) continue;
+                const userId = String(u.ID);
+                syncedIds.add(userId);
+                await registerEmployee(userId, name, domain, {
+                    department: u.UF_DEPARTMENT ? String(u.UF_DEPARTMENT) : null,
+                    email:      u.EMAIL || null,
+                    isActive:   true,
+                });
             }
             total = resp.total || 0;
             start += resp.result.length;
         } while (start < total);
-        console.log(`✅ Синхронизировано сотрудников: ${start}, новых: ${newEmployees.length}`);
 
-        // Приветствуем новых сотрудников
-        if (newEmployees.length > 0) {
-            const portal = await getPortal(domain);
-            if (portal?.bot_id) {
-                for (const emp of newEmployees) {
-                    await greetEmployee(domain, accessToken, portal.bot_id, emp.id, emp.name);
-                    await new Promise(r => setTimeout(r, 300));
-                }
-            }
+        // Помечаем уволенных/отключённых
+        if (syncedIds.size > 0) {
+            await pool.query(
+                `UPDATE employees SET is_active=FALSE
+                  WHERE domain=$1 AND user_id != ALL($2::text[]) AND is_active=TRUE`,
+                [domain, Array.from(syncedIds)]
+            );
         }
-        return start;
+
+        console.log(`✅ Синхронизировано сотрудников: ${syncedIds.size}`);
+        return syncedIds.size;
     } catch (err) {
         console.error('❌ syncAllEmployees:', err.message);
         return 0;
     }
 }
-
-// Отправляет приветственное сообщение новому сотруднику и ставит флаг greeted
-async function greetEmployee(domain, accessToken, botId, userId, userName) {
-    try {
-        const firstName = userName.split(' ')[0];
-        const text =
-            `👋 Привет, ${firstName}!\n\n` +
-            `Я бот учёта рабочего времени. Буду помогать фиксировать твои приходы и уходы.\n\n` +
-            `📌 Что я умею:\n` +
-            `• ✅ Пришёл — отметить начало рабочего дня\n` +
-            `• 🚪 Ушёл — отметить конец рабочего дня\n` +
-            `• 📊 Статус — посмотреть свои отметки за сегодня\n` +
-            `• ❓ Помощь — справка по командам\n\n` +
-            `Напиши мне или нажми кнопку когда придёшь в офис 🏢`;
-        const r = await notifyUserInBotChat(domain, accessToken, botId, userId, text);
-        if (r && r.result !== false) {
-            await pool.query(`UPDATE employees SET greeted=TRUE WHERE user_id=$1`, [userId]);
-            console.log(`✅ greetEmployee: приветствие отправлено → ${userName} (${userId})`);
-        }
-    } catch (err) {
-        console.error(`❌ greetEmployee user=${userId}:`, err.message);
-    }
-}
-
 
 // ─── Bitrix24: поиск пользователей ────────────────────────────────────────────
 
@@ -596,15 +580,15 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
     return r;
 }
 
-// Уведомление сотруднику от имени бота.
-// DIALOG_ID вида 'u<userId>' — стандартный формат Битрикс24 для личного диалога,
-// работает для любого пользователя портала без необходимости открывать чат первым.
+// Отправляет уведомление от имени бота любому сотруднику портала.
+// DIALOG_ID='u<userId>' — официальный формат Битрикс24 для обращения к конкретному пользователю.
+// Работает даже если сотрудник никогда не открывал чат с ботом.
 async function notifyUserInBotChat(domain, accessToken, botId, targetUserId, message) {
     const dialogId = `u${targetUserId}`;
     console.log(`📣 notifyUser → userId=${targetUserId}, dialog=${dialogId}`);
     const r = await sendMessage(domain, accessToken, botId, dialogId, message, null);
     if (!r || r.result === false) {
-        console.warn(`⚠️ notifyUser: не удалось отправить сообщение пользователю ${targetUserId}`, JSON.stringify(r));
+        console.warn(`⚠️ notifyUser: ошибка отправки user=${targetUserId}`, JSON.stringify(r));
     }
     return r;
 }
@@ -704,13 +688,9 @@ app.post('/install', async (req, res) => {
             if (botId) await savePortal(domain, AUTH_ID, REFRESH_ID, botId, ENDPOINT);
         }
 
-        // Подписываемся на событие входа пользователя (для приветствия новых сотрудников)
-        const loginHandlerUrl = `https://${APP_DOMAIN}/onlogin`;
-        await callBitrix(domain, AUTH_ID, 'event.bind', {
-            event:   'ONUSER_LOGIN',
-            handler: loginHandlerUrl,
-        });
-        console.log(`✅ event.bind ONUSER_LOGIN → ${loginHandlerUrl}`);
+        // Синхронизируем всех сотрудников сразу после установки
+        setImmediate(() => syncAllEmployees(domain, AUTH_ID).catch(e =>
+            console.error('❌ install sync:', e.message)));
     }
 
     res.send(`<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
@@ -864,9 +844,9 @@ app.post('/imbot', async (req, res) => {
             if (b24user?.name) resolvedName = b24user.name;
         }
 
-        // Регистрируем сотрудника + сохраняем dialog_id для будущих уведомлений
-        if (FROM_USER_ID && resolvedName && DIALOG_ID) {
-            await registerEmployee(FROM_USER_ID, resolvedName, domain, DIALOG_ID);
+        // Регистрируем/обновляем сотрудника в локальной БД
+        if (FROM_USER_ID && resolvedName) {
+            await registerEmployee(FROM_USER_ID, resolvedName, domain);
         }
 
         const userIsAdmin = await isAdmin(FROM_USER_ID);
@@ -1327,7 +1307,7 @@ app.get('/debug', async (req, res) => {
     const portal = await getPortal(domain);
     const { rows: admins }    = await pool.query(`SELECT user_id, user_name, added_at FROM admins`);
     const { rows: schedules } = await pool.query(`SELECT * FROM schedules WHERE date_to>=CURRENT_DATE ORDER BY date_from`);
-    const { rows: employees } = await pool.query(`SELECT user_id, user_name, dialog_id, last_seen FROM employees ORDER BY user_name`);
+    const { rows: employees } = await pool.query(`SELECT user_id, user_name, department, is_active, last_seen FROM employees ORDER BY user_name`);
     res.json({ domain, portal_in_db:!!portal,
         data: portal ? { bot_id:portal.bot_id, token:portal.access_token?.slice(0,12)+'...', updated:portal.updated_at } : null,
         admins, active_schedules:schedules, employees });
@@ -1367,7 +1347,7 @@ app.get('/test-bot', async (req, res) => {
     const profile   = await callBitrix(domain, portal.access_token, 'profile', {});
     const bots      = await callBitrix(domain, portal.access_token, 'imbot.bot.list', {});
     const { rows: admins }    = await pool.query(`SELECT user_id, user_name FROM admins`);
-    const { rows: employees } = await pool.query(`SELECT user_id, user_name, dialog_id FROM employees ORDER BY user_name`);
+    const { rows: employees } = await pool.query(`SELECT user_id, user_name, department, email, is_active FROM employees ORDER BY user_name`);
     res.json({ bot_id:portal.bot_id,
         profile_check: profile?.result ? `✅ ${profile.result.NAME} ${profile.result.LAST_NAME}` : '❌',
         bots_in_b24: bots?.result||null, admins_in_db:admins, employees_in_db:employees,
@@ -1379,45 +1359,11 @@ app.get('/sync-employees', async (req, res) => {
     const portal = await getPortal(domain);
     if (!portal) return res.json({ ok:false, error:'Портал не найден.' });
     const count = await syncAllEmployees(domain, portal.access_token);
-    const { rows } = await pool.query(`SELECT user_id, user_name, dialog_id FROM employees ORDER BY user_name`);
+    const { rows } = await pool.query(`SELECT user_id, user_name, department, email, is_active FROM employees ORDER BY user_name`);
     res.json({ ok:true, synced:count, employees:rows });
 });
 
-// ─── Вебхук: первый вход пользователя в Битрикс24 ────────────────────────────
-// Подписка регистрируется автоматически при установке через event.bind (ONUSER_LOGIN).
-// При каждом входе проверяем флаг greeted — если false, шлём приветствие.
-app.post('/onlogin', async (req, res) => {
-    res.sendStatus(200); // быстро отвечаем Битрикс24
-    try {
-        const domain = req.body.auth?.domain || req.body.DOMAIN || req.body.domain || '';
-        const userId = String(req.body.data?.USER_ID || req.body.USER_ID || '');
-        if (!domain || !userId) return;
-
-        // Проверяем: уже приветствовали?
-        const { rows } = await pool.query(
-            `SELECT user_id, user_name, greeted FROM employees WHERE user_id=$1`, [userId]);
-
-        if (rows.length > 0 && rows[0].greeted) return; // уже было приветствие
-
-        const portal = await getPortal(domain);
-        if (!portal?.bot_id) return;
-
-        // Если сотрудника нет в БД — подтягиваем из Битрикс24
-        let userName = rows[0]?.user_name;
-        if (!userName) {
-            const u = await getBitrixUser(domain, portal.access_token, userId);
-            if (!u) return;
-            await registerEmployee(userId, u.name, domain, null);
-            userName = u.name;
-        }
-
-        await greetEmployee(domain, portal.access_token, portal.bot_id, userId, userName);
-    } catch (err) {
-        console.error('❌ /onlogin:', err.message);
-    }
-});
-
-
+// ─── Очистка ──────────────────────────────────────────────────────────────────
 
 cron.schedule('*/15 * * * *', async () => {
     await pool.query(`DELETE FROM geo_tokens WHERE created_at < NOW()-INTERVAL '15 minutes'`);
@@ -1425,23 +1371,21 @@ cron.schedule('*/15 * * * *', async () => {
     console.log('🧹 Очистка');
 });
 
-// Ежедневная синхронизация сотрудников из Битрикс24 (каждый день в 07:00 по Екатеринбургу = 02:00 UTC)
+// Ежедневная синхронизация сотрудников (07:00 Екатеринбург = 02:00 UTC)
 cron.schedule('0 2 * * *', async () => {
-    console.log('🔄 [cron] Авто-синхронизация сотрудников...');
+    console.log('🔄 [cron] Синхронизация сотрудников...');
     try {
         const { rows: portals } = await pool.query(`SELECT domain, access_token FROM portals`);
         for (const p of portals) {
-            const count = await syncAllEmployees(p.domain, p.access_token);
-            console.log(`✅ [cron] ${p.domain}: синхронизировано ${count} сотрудников`);
+            const n = await syncAllEmployees(p.domain, p.access_token);
+            console.log(`✅ [cron] ${p.domain}: ${n} сотрудников`);
         }
-    } catch (err) {
-        console.error('❌ [cron] Ошибка авто-синхронизации:', err.message);
-    }
+    } catch (e) { console.error('❌ [cron] sync:', e.message); }
 });
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
 
-initDB().then(async () => {
+initDB().then(() => {
     app.listen(port, '0.0.0.0', () => {
         console.log(`🚀 https://${APP_DOMAIN}`);
         console.log(`📍 Офис 1: ${OFFICE_LAT}, ${OFFICE_LON} (${OFFICE_RADIUS}м)`);
@@ -1452,17 +1396,12 @@ initDB().then(async () => {
     });
     reports.scheduleCronReports(pool, smtpConfig);
 
-    // Первичная синхронизация сотрудников при старте (через 5 сек, чтобы сервер успел поднятья)
+    // Синхронизация сотрудников при старте (через 5 сек после поднятия)
     setTimeout(async () => {
-        console.log('🔄 [startup] Первичная синхронизация сотрудников...');
         try {
             const { rows: portals } = await pool.query(`SELECT domain, access_token FROM portals`);
-            for (const p of portals) {
-                await syncAllEmployees(p.domain, p.access_token);
-            }
-        } catch (err) {
-            console.error('❌ [startup] syncAllEmployees:', err.message);
-        }
+            for (const p of portals) await syncAllEmployees(p.domain, p.access_token);
+        } catch (e) { console.error('❌ [startup] sync:', e.message); }
     }, 5000);
 }).catch(err => {
     console.error('❌ БД:', err.message);
