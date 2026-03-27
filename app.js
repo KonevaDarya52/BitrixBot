@@ -57,10 +57,11 @@ async function initDB() {
         data JSONB DEFAULT '{}', created_at TIMESTAMPTZ DEFAULT NOW())`);
     await pool.query(`CREATE TABLE IF NOT EXISTS employees (
         user_id TEXT PRIMARY KEY, user_name TEXT NOT NULL, domain TEXT,
-        dialog_id TEXT,
+        dialog_id TEXT, greeted BOOLEAN DEFAULT FALSE,
         first_seen TIMESTAMPTZ DEFAULT NOW(), last_seen TIMESTAMPTZ DEFAULT NOW())`);
-    // Добавляем колонку dialog_id если её нет (для существующих БД)
+    // Добавляем колонки если их нет (для существующих БД)
     await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS dialog_id TEXT`);
+    await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS greeted BOOLEAN DEFAULT FALSE`);
     console.log('✅ БД инициализирована');
 }
 
@@ -240,16 +241,18 @@ async function getSchedulesToday() {
 
 // ─── Реестр сотрудников ───────────────────────────────────────────────────────
 
-// dialog_id сохраняем чтобы потом слать уведомления в чат бота
+// Возвращает true если сотрудник только что добавлен (новый), false если уже был
 async function registerEmployee(userId, userName, domain, dialogId) {
-    await pool.query(
-        `INSERT INTO employees (user_id, user_name, domain, dialog_id, first_seen, last_seen)
-         VALUES ($1,$2,$3,$4,NOW(),NOW())
+    const res = await pool.query(
+        `INSERT INTO employees (user_id, user_name, domain, dialog_id, greeted, first_seen, last_seen)
+         VALUES ($1,$2,$3,$4,FALSE,NOW(),NOW())
          ON CONFLICT (user_id) DO UPDATE SET
              user_name  = EXCLUDED.user_name,
              dialog_id  = COALESCE(EXCLUDED.dialog_id, employees.dialog_id),
-             last_seen  = NOW()`,
+             last_seen  = NOW()
+         RETURNING (xmax = 0) AS inserted`,
         [String(userId), userName, domain, dialogId || null]);
+    return res.rows[0]?.inserted === true;
 }
 
 async function getEmployeeDialogId(userId) {
@@ -260,33 +263,31 @@ async function getEmployeeDialogId(userId) {
 async function syncAllEmployees(domain, accessToken) {
     try {
         let start = 0, total = 0;
-        const allUsers = [];
+        const newEmployees = [];
         do {
             const resp = await callBitrix(domain, accessToken, 'user.get', { ACTIVE: true, start });
             if (!resp?.result?.length) break;
             for (const u of resp.result) {
                 const name = `${u.NAME || ''} ${u.LAST_NAME || ''}`.trim();
                 if (name) {
-                    await registerEmployee(String(u.ID), name, domain, null);
-                    allUsers.push({ id: String(u.ID), name });
+                    const isNew = await registerEmployee(String(u.ID), name, domain, null);
+                    if (isNew) newEmployees.push({ id: String(u.ID), name });
                 }
             }
             total = resp.total || 0;
             start += resp.result.length;
         } while (start < total);
-        console.log(`✅ Синхронизировано сотрудников: ${start}`);
+        console.log(`✅ Синхронизировано сотрудников: ${start}, новых: ${newEmployees.length}`);
 
-        // Открываем чат бота с теми, у кого ещё нет dialog_id
-        const portal = await getPortal(domain);
-        if (portal?.bot_id) {
-            const { rows: noDialog } = await pool.query(
-                `SELECT user_id FROM employees WHERE domain=$1 AND dialog_id IS NULL`, [domain]);
-            for (const row of noDialog) {
-                await openBotChatForUser(domain, accessToken, portal.bot_id, row.user_id);
-                // небольшая пауза чтобы не перегружать API Битрикс24
-                await new Promise(r => setTimeout(r, 300));
+        // Приветствуем новых сотрудников
+        if (newEmployees.length > 0) {
+            const portal = await getPortal(domain);
+            if (portal?.bot_id) {
+                for (const emp of newEmployees) {
+                    await greetEmployee(domain, accessToken, portal.bot_id, emp.id, emp.name);
+                    await new Promise(r => setTimeout(r, 300));
+                }
             }
-            console.log(`📣 Попытка открыть чат для ${noDialog.length} сотрудников без dialog_id`);
         }
         return start;
     } catch (err) {
@@ -295,34 +296,29 @@ async function syncAllEmployees(domain, accessToken) {
     }
 }
 
-// Открывает личный чат бота с пользователем и сохраняет dialog_id.
-// Bitrix24: imbot.chat.add создаёт чат между ботом и пользователем;
-// если чат уже существует — возвращает его ID.
-async function openBotChatForUser(domain, accessToken, botId, userId) {
+// Отправляет приветственное сообщение новому сотруднику и ставит флаг greeted
+async function greetEmployee(domain, accessToken, botId, userId, userName) {
     try {
-        const resp = await callBitrix(domain, accessToken, 'imbot.chat.add', {
-            BOT_ID:   botId,
-            TITLE:    '',
-            USERS:    [Number(userId)],
-        });
-        // Битрикс возвращает chatId; dialog_id для личного чата = 'chat' + chatId
-        const chatId = resp?.result;
-        if (chatId) {
-            const dialogId = `chat${chatId}`;
-            await pool.query(
-                `UPDATE employees SET dialog_id=$1 WHERE user_id=$2 AND dialog_id IS NULL`,
-                [dialogId, String(userId)]);
-            console.log(`✅ openBotChat user=${userId} → dialog=${dialogId}`);
-            return dialogId;
-        } else {
-            console.warn(`⚠️ openBotChat user=${userId}: нет chatId в ответе`, JSON.stringify(resp));
-            return null;
+        const firstName = userName.split(' ')[0];
+        const text =
+            `👋 Привет, ${firstName}!\n\n` +
+            `Я бот учёта рабочего времени. Буду помогать фиксировать твои приходы и уходы.\n\n` +
+            `📌 Что я умею:\n` +
+            `• ✅ Пришёл — отметить начало рабочего дня\n` +
+            `• 🚪 Ушёл — отметить конец рабочего дня\n` +
+            `• 📊 Статус — посмотреть свои отметки за сегодня\n` +
+            `• ❓ Помощь — справка по командам\n\n` +
+            `Напиши мне или нажми кнопку когда придёшь в офис 🏢`;
+        const r = await notifyUserInBotChat(domain, accessToken, botId, userId, text);
+        if (r && r.result !== false) {
+            await pool.query(`UPDATE employees SET greeted=TRUE WHERE user_id=$1`, [userId]);
+            console.log(`✅ greetEmployee: приветствие отправлено → ${userName} (${userId})`);
         }
     } catch (err) {
-        console.error(`❌ openBotChatForUser user=${userId}:`, err.message);
-        return null;
+        console.error(`❌ greetEmployee user=${userId}:`, err.message);
     }
 }
+
 
 // ─── Bitrix24: поиск пользователей ────────────────────────────────────────────
 
@@ -600,22 +596,17 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
     return r;
 }
 
-// Уведомление сотруднику в его личный чат с ботом.
-// Если dialog_id ещё не известен — пытаемся открыть чат через imbot.chat.add.
+// Уведомление сотруднику от имени бота.
+// DIALOG_ID вида 'u<userId>' — стандартный формат Битрикс24 для личного диалога,
+// работает для любого пользователя портала без необходимости открывать чат первым.
 async function notifyUserInBotChat(domain, accessToken, botId, targetUserId, message) {
-    let dialogId = await getEmployeeDialogId(targetUserId);
-
-    if (!dialogId) {
-        console.log(`🔄 notifyUser: нет dialog_id для user ${targetUserId}, пробуем открыть чат...`);
-        dialogId = await openBotChatForUser(domain, accessToken, botId, targetUserId);
-    }
-
-    if (!dialogId) {
-        console.warn(`⚠️ notifyUser: не удалось получить dialog_id для user ${targetUserId}`);
-        return null;
-    }
+    const dialogId = `u${targetUserId}`;
     console.log(`📣 notifyUser → userId=${targetUserId}, dialog=${dialogId}`);
-    return sendMessage(domain, accessToken, botId, dialogId, message, null);
+    const r = await sendMessage(domain, accessToken, botId, dialogId, message, null);
+    if (!r || r.result === false) {
+        console.warn(`⚠️ notifyUser: не удалось отправить сообщение пользователю ${targetUserId}`, JSON.stringify(r));
+    }
+    return r;
 }
 
 // ─── Регистрация команд ───────────────────────────────────────────────────────
@@ -712,6 +703,14 @@ app.post('/install', async (req, res) => {
             const botId = await registerBot(domain, AUTH_ID, null);
             if (botId) await savePortal(domain, AUTH_ID, REFRESH_ID, botId, ENDPOINT);
         }
+
+        // Подписываемся на событие входа пользователя (для приветствия новых сотрудников)
+        const loginHandlerUrl = `https://${APP_DOMAIN}/onlogin`;
+        await callBitrix(domain, AUTH_ID, 'event.bind', {
+            event:   'ONUSER_LOGIN',
+            handler: loginHandlerUrl,
+        });
+        console.log(`✅ event.bind ONUSER_LOGIN → ${loginHandlerUrl}`);
     }
 
     res.send(`<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
@@ -1384,7 +1383,41 @@ app.get('/sync-employees', async (req, res) => {
     res.json({ ok:true, synced:count, employees:rows });
 });
 
-// ─── Очистка ──────────────────────────────────────────────────────────────────
+// ─── Вебхук: первый вход пользователя в Битрикс24 ────────────────────────────
+// Подписка регистрируется автоматически при установке через event.bind (ONUSER_LOGIN).
+// При каждом входе проверяем флаг greeted — если false, шлём приветствие.
+app.post('/onlogin', async (req, res) => {
+    res.sendStatus(200); // быстро отвечаем Битрикс24
+    try {
+        const domain = req.body.auth?.domain || req.body.DOMAIN || req.body.domain || '';
+        const userId = String(req.body.data?.USER_ID || req.body.USER_ID || '');
+        if (!domain || !userId) return;
+
+        // Проверяем: уже приветствовали?
+        const { rows } = await pool.query(
+            `SELECT user_id, user_name, greeted FROM employees WHERE user_id=$1`, [userId]);
+
+        if (rows.length > 0 && rows[0].greeted) return; // уже было приветствие
+
+        const portal = await getPortal(domain);
+        if (!portal?.bot_id) return;
+
+        // Если сотрудника нет в БД — подтягиваем из Битрикс24
+        let userName = rows[0]?.user_name;
+        if (!userName) {
+            const u = await getBitrixUser(domain, portal.access_token, userId);
+            if (!u) return;
+            await registerEmployee(userId, u.name, domain, null);
+            userName = u.name;
+        }
+
+        await greetEmployee(domain, portal.access_token, portal.bot_id, userId, userName);
+    } catch (err) {
+        console.error('❌ /onlogin:', err.message);
+    }
+});
+
+
 
 cron.schedule('*/15 * * * *', async () => {
     await pool.query(`DELETE FROM geo_tokens WHERE created_at < NOW()-INTERVAL '15 minutes'`);
