@@ -173,6 +173,25 @@ async function listAdmins() {
     return rows;
 }
 
+// ─── Проверка активного режима администратора ──────────────────────────────
+async function isInAdminMode(userId) {
+    const { rows } = await pool.query(
+        `SELECT 1 FROM pending_input 
+         WHERE user_id=$1 AND action='admin_session'`, 
+        [String(userId)]
+    );
+    return rows.length > 0;
+}
+
+// Обновляет время сессии чтобы крон её не удалил
+async function touchAdminSession(userId) {
+    await pool.query(
+        `UPDATE pending_input SET created_at=NOW() 
+         WHERE user_id=$1 AND action='admin_session'`,
+        [String(userId)]
+    );
+}
+
 // ─── Ожидание ввода ───────────────────────────────────────────────────────────
 
 async function setPending(userId, action, step, data = {}) {
@@ -729,7 +748,9 @@ app.post('/confirm-geo', async (req, res) => {
     const sched = await getActiveSchedule(rec.user_id);
 const isRemote = sched && sched.status === 'remote';
     const { inOffice, officeName } = checkOffice(lat, lon);
-    const kb       = (await isAdmin(rec.user_id)) ? kbAdmin() : kbMain();
+    // Проверяем именно режим, а не просто права — иначе всем админам покажутся кнопки
+    const userInAdminMode = await isInAdminMode(rec.user_id);
+    const kb = userInAdminMode ? kbAdmin() : kbMain();
 
     if (!inOffice && !isRemote) {
         const hint = OFFICE2_LAT !== null
@@ -820,8 +841,12 @@ app.post('/imbot', async (req, res) => {
 
         const userIsAdmin = await isAdmin(FROM_USER_ID);
         const pending     = await getPending(FROM_USER_ID);
-        const inAdminMode = userIsAdmin && (pending?.action === 'admin_session');
+        // inAdminMode — только явная сессия, без самопроизвольного переключения
+        const inAdminMode = userIsAdmin && pending?.action === 'admin_session';
         const kb = inAdminMode ? kbAdmin() : await mainKb(FROM_USER_ID);
+
+        // Продлеваем сессию при каждом действии администратора
+        if (inAdminMode) await touchAdminSession(FROM_USER_ID);
 
         if (event === 'ONIMBOTJOINCHAT') {
             const marked = await hasMarkedToday(FROM_USER_ID);
@@ -854,9 +879,18 @@ app.post('/imbot', async (req, res) => {
         }
 
         if (action === 'cancel_input') {
+            // Сохраняем флаг adminMode ДО очистки pending
+            const wasInAdminMode = inAdminMode;
             await clearPending(FROM_USER_ID);
-            if (inAdminMode) await setPending(FROM_USER_ID, 'admin_session', 'active');
-            await sendMessage(domain, authToken, botId, DIALOG_ID, `❌ Действие отменено.`, kb);
+            // Восстанавливаем admin_session если был в режиме администратора
+                if (wasInAdminMode) {
+                    await setPending(FROM_USER_ID, 'admin_session', 'active');
+                    await sendMessage(domain, authToken, botId, DIALOG_ID, 
+                    `❌ Действие отменено.\n\n🔐 Режим администратора`, kbAdmin());
+                 } else {
+                    await sendMessage(domain, authToken, botId, DIALOG_ID, 
+                    `❌ Действие отменено.`, await mainKb(FROM_USER_ID));
+                }
             return;
         }
 
@@ -867,13 +901,30 @@ app.post('/imbot', async (req, res) => {
             return;
         }
 
-        if (action === 'admin_logout' || action === 'admin_back') {
+        if (action === 'admin_logout') {
+            // Явный выход — только по этой команде
             await clearPending(FROM_USER_ID);
             const marked = await hasMarkedToday(FROM_USER_ID);
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                `✅ Вы вышли из режима администратора.\n\n` + buildGreeting(resolvedName, firstName, false, marked),
+                `🔓 Вы вышли из режима администратора.\n\n` +
+                buildGreeting(resolvedName, firstName, false, marked),
                 await mainKb(FROM_USER_ID));
-            return;
+             return;
+        }
+
+        if (action === 'admin_back') {
+            // Назад — возврат в меню администратора, НЕ выход из режима
+            if (inAdminMode) {
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                 `🔐 Режим администратора\n\n⬇️ Выбирай действие:`,
+                kbAdmin());
+            } else {
+                const marked = await hasMarkedToday(FROM_USER_ID);
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                     buildGreeting(resolvedName, firstName, false, marked),
+                        await mainKb(FROM_USER_ID));
+         }
+        return;
         }
 
         if (action === 'arrived' || action === 'пришел' || action === 'пришёл') {
@@ -1336,7 +1387,15 @@ app.get('/sync-employees', async (req, res) => {
 
 cron.schedule('*/15 * * * *', async () => {
     await pool.query(`DELETE FROM geo_tokens WHERE created_at < NOW()-INTERVAL '15 minutes'`);
-    await pool.query(`DELETE FROM pending_input WHERE action != 'admin_session' AND created_at < NOW()-INTERVAL '30 minutes'`);
+    // Удаляем незавершённые диалоги (не admin_session)
+    await pool.query(`DELETE FROM pending_input 
+        WHERE action != 'admin_session' 
+          AND created_at < NOW()-INTERVAL '30 minutes'`);
+    // admin_session не трогаем — она продлевается через touchAdminSession при каждом действии
+    // Но если сессия совсем старая (8+ часов) — считаем её брошенной
+    await pool.query(`DELETE FROM pending_input 
+        WHERE action = 'admin_session' 
+          AND created_at < NOW()-INTERVAL '8 hours'`);
     console.log('🧹 Очистка');
 });
 
