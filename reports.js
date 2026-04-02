@@ -873,32 +873,23 @@ async function buildExcelReport(pool, period = 'today') {
 //  Render блокирует SMTP-порты, поэтому используем HTTPS-запрос к API Brevo
 // ═════════════════════════════════════════════════════════════════════════════
 async function sendReportByEmail(pool, period, config) {
-    const { smtpUser, brevoApiKey, reportEmail } = config;
-
-    if (!brevoApiKey) {
-        return { ok: false, error: 'Не задан BREVO_API_KEY' };
-    }
-    if (!reportEmails || reportEmails.length === 0) {
-    return { ok: false, error: 'Не задан REPORT_EMAIL' };
-    }
+    const { smtpUser, brevoApiKey, reportEmails } = config;   // ← reportEmails
+    if (!brevoApiKey) return { ok: false, error: 'Не задан BREVO_API_KEY' };
+    if (!reportEmails || reportEmails.length === 0) return { ok: false, error: 'Не задан REPORT_EMAIL' };
 
     try {
         const { file, name, label } = await buildExcelReport(pool, period);
-
-        // Читаем файл и кодируем в base64 для вложения
         const fileBuffer  = fs.readFileSync(file);
         const fileBase64  = fileBuffer.toString('base64');
-
         const dateRu = new Date().toLocaleDateString('ru-RU', { timeZone: 'Asia/Yekaterinburg' });
         const senderEmail = smtpUser || 'bot@brevo.com';
 
-        // HTTP POST запрос к Brevo API — не использует SMTP-порты
         const axios = require('axios');
         const response = await axios.post(
             'https://api.brevo.com/v3/smtp/email',
             {
                 sender:  { name: '🤖 Учёт времени', email: senderEmail },
-                to: reportEmails.map(email => ({ email })),
+                to:      reportEmails.map(email => ({ email })),   // ← массив адресов
                 subject: `Отчёт посещаемости — ${label} — ${dateRu}`,
                 htmlContent: `
                     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
@@ -916,21 +907,12 @@ async function sendReportByEmail(pool, period, config) {
                     </div>`,
                 attachment: [{ content: fileBase64, name }],
             },
-            {
-                headers: {
-                    'api-key':      brevoApiKey,
-                    'Content-Type': 'application/json',
-                },
-                timeout: 30000,
-            }
+            { headers: { 'api-key': brevoApiKey, 'Content-Type': 'application/json' }, timeout: 30000 }
         );
 
-        // Удаляем временный файл
         try { fs.unlinkSync(file); } catch (_) {}
-
-        console.log(`✅ Отчёт "${label}" отправлен на ${reportEmail} (Brevo API, статус ${response.status})`);
-        return { ok: true, label, email: reportEmail };
-
+        console.log(`✅ Отчёт "${label}" отправлен на ${reportEmails.join(', ')} (Brevo API, статус ${response.status})`);
+        return { ok: true, label, email: reportEmails };
     } catch (err) {
         console.error('❌ Email error:', err.message);
         return { ok: false, error: err.message };

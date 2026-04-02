@@ -1198,7 +1198,7 @@ const progressText =
             await sendMessage(domain, authToken, botId, DIALOG_ID, `⏳ Формирую Excel-отчёт и отправляю на почту...`, kbAdmin());
             const result = await sendReportByEmail(action.replace('email_', ''));
             await sendMessage(domain, authToken, botId, DIALOG_ID,
-                result.ok ? `✅ Отчёт успешно отправлен!\n📧 ${smtpConfig.reportEmail}`
+                result.ok ? `✅ Отчёт успешно отправлен!\n📧 ${smtpConfig.reportEmails}`
                           : `❌ Не удалось отправить отчёт.\n\n_${result.error}_`, kbAdmin());
 
         } else if (action === 'schedule') {
@@ -1395,7 +1395,7 @@ app.get('/status', async (req, res) => {
     res.json({ ok:true, service:'v14', portals:rows, time:new Date().toISOString(),
         env:{ app_domain:APP_DOMAIN, office:`${OFFICE_LAT},${OFFICE_LON}`, radius:OFFICE_RADIUS,
               office2: OFFICE2_LAT ? `${OFFICE2_LAT},${OFFICE2_LON} (${OFFICE2_NAME})` : 'не задан',
-              manager:MANAGER_ID, report_email:smtpConfig.reportEmail, smtp:`${smtpConfig.smtpHost}:${smtpConfig.smtpPort}`, smtp_ready:!!(smtpConfig.smtpUser&&smtpConfig.smtpPass) } });
+              manager:MANAGER_ID, report_email:smtpConfig.reportEmails, smtp:`${smtpConfig.smtpHost}:${smtpConfig.smtpPort}`, smtp_ready:!!(smtpConfig.smtpUser&&smtpConfig.smtpPass) } });
 });
 
 app.get('/debug', async (req, res) => {
@@ -1447,7 +1447,7 @@ app.get('/test-bot', async (req, res) => {
     res.json({ bot_id:portal.bot_id,
         profile_check: profile?.result ? `✅ ${profile.result.NAME} ${profile.result.LAST_NAME}` : '❌',
         bots_in_b24: bots?.result||null, admins_in_db:admins, employees_in_db:employees,
-        smtp:`${smtpConfig.smtpHost}:${smtpConfig.smtpPort}`, smtp_ready:!!(smtpConfig.smtpUser&&smtpConfig.smtpPass), report_email:smtpConfig.reportEmail });
+        smtp:`${smtpConfig.smtpHost}:${smtpConfig.smtpPort}`, smtp_ready:!!(smtpConfig.smtpUser&&smtpConfig.smtpPass), report_email:smtpConfig.reportEmails });
 });
 
 app.get('/sync-employees', async (req, res) => {
@@ -1496,7 +1496,7 @@ initDB().then(() => {
         console.log(`📍 Офис 1: ${OFFICE_LAT}, ${OFFICE_LON} (${OFFICE_RADIUS}м)`);
         if (OFFICE2_LAT) console.log(`📍 Офис 2: ${OFFICE2_LAT}, ${OFFICE2_LON} — ${OFFICE2_NAME}`);
         console.log(`🆔 Менеджер: ${MANAGER_ID}`);
-        console.log(`📧 ${smtpConfig.reportEmail} | SMTP: ${smtpConfig.smtpUser ? `✅ ${smtpConfig.smtpHost}:${smtpConfig.smtpPort}` : '❌ не настроен'}`);
+        console.log(`📧 ${smtpConfig.reportEmails} | SMTP: ${smtpConfig.smtpUser ? `✅ ${smtpConfig.smtpHost}:${smtpConfig.smtpPort}` : '❌ не настроен'}`);
         console.log('=== ✅ READY ===');
     });
     reports.scheduleCronReports(pool, smtpConfig);
