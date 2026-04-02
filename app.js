@@ -20,10 +20,13 @@ const OFFICE2_LAT   = process.env.OFFICE2_LAT ? parseFloat(process.env.OFFICE2_L
 const OFFICE2_LON   = process.env.OFFICE2_LON ? parseFloat(process.env.OFFICE2_LON) : null;
 const OFFICE2_NAME  = process.env.OFFICE2_NAME || 'Филиал';
 const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
+const reportEmailsRaw = process.env.REPORT_EMAIL || '';
+const reportEmails = reportEmailsRaw.split(',').map(e => e.trim()).filter(e => e);
+
 const smtpConfig = {
     smtpUser:    process.env.SMTP_USER   || '',
     brevoApiKey: process.env.BREVO_API_KEY || '',
-    reportEmail: process.env.REPORT_EMAIL || '',
+    reportEmails,   // ← теперь массив
 };
 
 const pool = new Pool({
@@ -503,6 +506,79 @@ async function savePortal(domain, accessToken, refreshToken, botId, clientEndpoi
 async function getPortal(domain) {
     const { rows } = await pool.query(`SELECT * FROM portals WHERE domain=$1`, [domain]);
     return rows[0] || null;
+}
+
+// Возвращает данные первого активного портала (домен, токен, botId)
+async function getActivePortal() {
+    const { rows } = await pool.query(`SELECT domain, access_token, bot_id FROM portals LIMIT 1`);
+    if (!rows.length) throw new Error('Нет зарегистрированного портала');
+    return { domain: rows[0].domain, accessToken: rows[0].access_token, botId: rows[0].bot_id };
+}
+
+async function morningReminder() {
+    try {
+        const { domain, accessToken, botId } = await getActivePortal();
+        const today = todaySV();
+
+        const { rows: employees } = await pool.query(`
+            SELECT user_id, user_name, dialog_id
+            FROM employees
+            WHERE dialog_id IS NOT NULL
+        `);
+
+        for (const emp of employees) {
+            // Уже отметился?
+            const { rows: marked } = await pool.query(`
+                SELECT 1 FROM attendance
+                WHERE user_id = $1
+                  AND (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $2::date
+                LIMIT 1
+            `, [emp.user_id, today]);
+            if (marked.length > 0) continue;
+
+            // На расписании (отпуск, больничный, выходной)?
+            const sched = await getActiveSchedule(emp.user_id);
+            if (sched && ['vacation','sick','dayoff'].includes(sched.status)) continue;
+
+            const message = `🌅 Доброе утро! Не забудь отметить приход на работе.`;
+            await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message);
+            console.log(`📨 Напоминание отправлено ${emp.user_name}`);
+        }
+    } catch (err) {
+        console.error('❌ morningReminder:', err.message);
+    }
+}
+
+async function eveningReminder() {
+    try {
+        const { domain, accessToken, botId } = await getActivePortal();
+        const today = todaySV();
+
+        const { rows: needRemind } = await pool.query(`
+            SELECT DISTINCT a.user_id, e.user_name
+            FROM attendance a
+            JOIN employees e ON e.user_id = a.user_id
+            WHERE (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1::date
+              AND a.type = 'in'
+              AND NOT EXISTS (
+                  SELECT 1 FROM attendance a2
+                  WHERE a2.user_id = a.user_id
+                    AND a2.type = 'out'
+                    AND (a2.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1::date
+              )
+        `, [today]);
+
+        for (const emp of needRemind) {
+            const sched = await getActiveSchedule(emp.user_id);
+            if (sched && ['vacation','sick','dayoff'].includes(sched.status)) continue;
+
+            const message = `🌆 Рабочий день подходит к концу. Не забудь отметить уход.`;
+            await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message);
+            console.log(`📨 Напоминание об уходе → ${emp.user_name}`);
+        }
+    } catch (err) {
+        console.error('❌ eveningReminder:', err.message);
+    }
 }
 
 async function saveAttendance(userId, userName, domain, type, lat, lon, inOffice, isRemote = false) {
@@ -1399,6 +1475,18 @@ cron.schedule('*/15 * * * *', async () => {
           AND created_at < NOW()-INTERVAL '8 hours'`);
     console.log('🧹 Очистка');
 });
+
+// Утро в 9:00 Екатеринбург = 4:00 UTC
+cron.schedule('0 4 * * 1-5', async () => {
+    console.log('⏰ Утреннее напоминание');
+    await morningReminder();
+}, { timezone: 'UTC' });
+
+// Вечер в 18:00 Екатеринбург = 13:00 UTC
+cron.schedule('0 13 * * 1-5', async () => {
+    console.log('⏰ Вечернее напоминание об уходе');
+    await eveningReminder();
+}, { timezone: 'UTC' });
 
 // ─── Запуск ───────────────────────────────────────────────────────────────────
 

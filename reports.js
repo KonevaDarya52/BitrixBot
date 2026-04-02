@@ -878,8 +878,8 @@ async function sendReportByEmail(pool, period, config) {
     if (!brevoApiKey) {
         return { ok: false, error: 'Не задан BREVO_API_KEY' };
     }
-    if (!reportEmail) {
-        return { ok: false, error: 'Не задан REPORT_EMAIL — куда отправлять?' };
+    if (!reportEmails || reportEmails.length === 0) {
+    return { ok: false, error: 'Не задан REPORT_EMAIL' };
     }
 
     try {
@@ -898,7 +898,7 @@ async function sendReportByEmail(pool, period, config) {
             'https://api.brevo.com/v3/smtp/email',
             {
                 sender:  { name: '🤖 Учёт времени', email: senderEmail },
-                to:      [{ email: reportEmail }],
+                to: reportEmails.map(email => ({ email })),
                 subject: `Отчёт посещаемости — ${label} — ${dateRu}`,
                 htmlContent: `
                     <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto">
