@@ -1385,6 +1385,7 @@ app.get('/sync-employees', async (req, res) => {
 
 // ─── Очистка ──────────────────────────────────────────────────────────────────
 
+
 cron.schedule('*/15 * * * *', async () => {
     await pool.query(`DELETE FROM geo_tokens WHERE created_at < NOW()-INTERVAL '15 minutes'`);
     // Удаляем незавершённые диалоги (не admin_session)
