@@ -64,6 +64,15 @@ async function initDB() {
         first_seen TIMESTAMPTZ DEFAULT NOW(), last_seen TIMESTAMPTZ DEFAULT NOW())`);
     // Добавляем колонку dialog_id если её нет (для существующих БД)
     await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS dialog_id TEXT`);
+    // Таблица типов рабочих графиков (5/2, 4/2, 2/2)
+    await pool.query(`CREATE TABLE IF NOT EXISTS employee_work_schedules (
+        user_id       TEXT PRIMARY KEY,
+        user_name     TEXT NOT NULL,
+        schedule_type TEXT NOT NULL,
+        cycle_start   DATE NOT NULL,
+        assigned_by   TEXT,
+        assigned_at   TIMESTAMPTZ DEFAULT NOW(),
+        updated_at    TIMESTAMPTZ DEFAULT NOW())`);
     console.log('✅ БД инициализирована');
 }
 
@@ -144,12 +153,123 @@ function parseDate(str) {
 }
 
 const SCHED_LABELS = {
-    vacation: '🏖 Отпуск',
-    sick:     '🤒 Больничный',
-    dayoff:   '📅 Выходной',
-    remote:   '🏠 Удалённо',
-    business: '✈️ Командировка',
+    vacation:   '🏖 Отпуск',
+    sick:       '🤒 Больничный',
+    dayoff:     '📅 Выходной',
+    remote:     '🏠 Удалённо',
+    business:   '✈️ Командировка',
+    work_sched: '🗓 Выходной по графику',
 };
+
+// ─── Типы рабочих графиков ────────────────────────────────────────────────────
+
+const WORK_SCHEDULE_TYPES = {
+    '5/2': { label: '5/2 (Пн–Пт)',            workDays: 5, restDays: 2 },
+    '4/2': { label: '4/2 (4 раб. + 2 вых.)',  workDays: 4, restDays: 2 },
+    '2/2': { label: '2/2 (2 раб. + 2 вых.)',  workDays: 2, restDays: 2 },
+};
+
+/**
+ * Является ли дата выходным по типу графика.
+ * scheduleType: '5/2' | '4/2' | '2/2'
+ * cycleStart:   YYYY-MM-DD — первый рабочий день цикла (для 4/2 и 2/2)
+ * date:         YYYY-MM-DD или Date
+ */
+function isRestDayBySchedule(scheduleType, cycleStart, date) {
+    if (!WORK_SCHEDULE_TYPES[scheduleType]) return false;
+    const checkDate = new Date(date);
+    checkDate.setHours(0, 0, 0, 0);
+
+    if (scheduleType === '5/2') {
+        const dow = checkDate.getDay();
+        return dow === 0 || dow === 6;
+    }
+
+    const { workDays, restDays } = WORK_SCHEDULE_TYPES[scheduleType];
+    const cycleLen  = workDays + restDays;
+    const startDate = new Date(cycleStart);
+    startDate.setHours(0, 0, 0, 0);
+    const diffDays     = Math.round((checkDate - startDate) / 86400000);
+    const posInCycle   = ((diffDays % cycleLen) + cycleLen) % cycleLen;
+    return posInCycle >= workDays;
+}
+
+/** Получить тип графика сотрудника из БД */
+async function getEmpWorkSchedule(userId) {
+    const { rows } = await pool.query(
+        `SELECT * FROM employee_work_schedules WHERE user_id = $1`, [String(userId)]);
+    return rows[0] || null;
+}
+
+/** Статус дня для сотрудника: { isRest, scheduleType, label } | null */
+async function getWorkScheduleStatus(userId, date) {
+    const ws = await getEmpWorkSchedule(userId);
+    if (!ws) return null;
+    const rest = isRestDayBySchedule(ws.schedule_type, ws.cycle_start, date || todaySV());
+    return {
+        isRest:       rest,
+        scheduleType: ws.schedule_type,
+        label:        rest ? `🗓 Выходной по графику (${ws.schedule_type})` : null,
+    };
+}
+
+/** Пакетная проверка: Map userId → { isRest, scheduleType } */
+async function getBatchWorkScheduleStatus(userIds, date) {
+    if (!userIds.length) return new Map();
+    const { rows } = await pool.query(
+        `SELECT * FROM employee_work_schedules WHERE user_id = ANY($1)`, [userIds.map(String)]);
+    const result = new Map();
+    for (const ws of rows) {
+        const rest = isRestDayBySchedule(ws.schedule_type, ws.cycle_start, date || todaySV());
+        result.set(ws.user_id, { isRest: rest, scheduleType: ws.schedule_type });
+    }
+    return result;
+}
+
+/** Пакетная проверка по диапазону дат: Map userId → { scheduleType, days: Map<date,bool> } */
+async function getBatchWorkScheduleForDates(userIds, dates) {
+    if (!userIds.length || !dates.length) return new Map();
+    const { rows } = await pool.query(
+        `SELECT * FROM employee_work_schedules WHERE user_id = ANY($1)`, [userIds.map(String)]);
+    const result = new Map();
+    for (const ws of rows) {
+        const dayMap = new Map();
+        for (const d of dates) dayMap.set(d, isRestDayBySchedule(ws.schedule_type, ws.cycle_start, d));
+        result.set(ws.user_id, { scheduleType: ws.schedule_type, days: dayMap });
+    }
+    return result;
+}
+
+/** Назначить/обновить тип графика сотрудника */
+async function setEmpWorkSchedule(userId, userName, scheduleType, cycleStart, assignedBy) {
+    await pool.query(`
+        INSERT INTO employee_work_schedules (user_id, user_name, schedule_type, cycle_start, assigned_by, assigned_at, updated_at)
+        VALUES ($1,$2,$3,$4,$5,NOW(),NOW())
+        ON CONFLICT (user_id) DO UPDATE SET
+            user_name=EXCLUDED.user_name, schedule_type=EXCLUDED.schedule_type,
+            cycle_start=EXCLUDED.cycle_start, assigned_by=EXCLUDED.assigned_by, updated_at=NOW()
+    `, [String(userId), userName, scheduleType, cycleStart, assignedBy || null]);
+}
+
+/** Удалить тип графика у сотрудника */
+async function removeEmpWorkSchedule(userId) {
+    const { rowCount } = await pool.query(
+        `DELETE FROM employee_work_schedules WHERE user_id=$1`, [String(userId)]);
+    return rowCount > 0;
+}
+
+/** Все назначенные типы графиков */
+async function getAllEmpWorkSchedules() {
+    const { rows } = await pool.query(`SELECT * FROM employee_work_schedules ORDER BY user_name`);
+    return rows;
+}
+
+function formatWorkScheduleInfo(ws) {
+    if (!ws) return 'Не назначен';
+    const info   = WORK_SCHEDULE_TYPES[ws.schedule_type];
+    const startRu = new Date(ws.cycle_start).toLocaleDateString('ru-RU');
+    return `${info?.label || ws.schedule_type} (цикл с ${startRu})`;
+}
 
 // ─── Администраторы ───────────────────────────────────────────────────────────
 
@@ -403,11 +523,34 @@ function kbAdmin() {
         { TEXT:'👥 Кто в офисе',     COMMAND:'who_in',       COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' },
         { TYPE:'NEWLINE' },
         { TEXT:'🗓 Расписание',       COMMAND:'schedule',     COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#e07b29', TEXT_COLOR:'#ffffff' },
-        { TEXT:'👤 Управление',       COMMAND:'admin_manage', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#7b4fa6', TEXT_COLOR:'#ffffff' },
+        { TEXT:'📊 Графики работы',   COMMAND:'work_sched',   COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#6a4c9c', TEXT_COLOR:'#ffffff' },
         { TYPE:'NEWLINE' },
+        { TEXT:'👤 Управление',       COMMAND:'admin_manage', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#7b4fa6', TEXT_COLOR:'#ffffff' },
         { TEXT:'📤 Отчёт на почту',   COMMAND:'send_report',  COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#2e7d32', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
         { TEXT:'🔓 Выйти из админа',  COMMAND:'admin_logout', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
     ];
+}
+
+function kbWorkSched() {
+    return [
+        { TEXT:'➕ Назначить график', COMMAND:'ws_assign', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' },
+        { TEXT:'📋 Список графиков',  COMMAND:'ws_list',   COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'❌ Удалить график',   COMMAND:'ws_remove', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#c0392b', TEXT_COLOR:'#ffffff' },
+        { TEXT:'◀️ Назад',            COMMAND:'admin_back', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#555555', TEXT_COLOR:'#ffffff' },
+    ];
+}
+
+function kbWorkSchedType() {
+    const colors = ['#5b8def','#3a7bd5','#2d8cff'];
+    const btns = Object.keys(WORK_SCHEDULE_TYPES).map((type, i) => ({
+        TEXT: WORK_SCHEDULE_TYPES[type].label, COMMAND: `ws_type_${type.replace('/','_')}`,
+        COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR: colors[i] || '#5b8def', TEXT_COLOR:'#ffffff',
+    }));
+    btns.push({ TYPE:'NEWLINE' });
+    btns.push({ TEXT:'❌ Отмена', COMMAND:'cancel_input', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' });
+    return btns;
 }
 
 function kbSchedule() {
@@ -540,6 +683,13 @@ async function morningReminder() {
             const sched = await getActiveSchedule(emp.user_id);
             if (sched && ['vacation','sick','dayoff'].includes(sched.status)) continue;
 
+            // Проверяем тип рабочего графика (4/2, 2/2 — может быть выходной)
+            const wsStatus = await getWorkScheduleStatus(emp.user_id);
+            if (wsStatus && wsStatus.isRest) {
+                console.log(`📅 ${emp.user_name} — выходной по графику ${wsStatus.scheduleType}`);
+                continue;
+            }
+
             const message = `🌅 Доброе утро! Не забудь отметить приход на работе.`;
             await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message);
             console.log(`📨 Напоминание отправлено ${emp.user_name}`);
@@ -571,6 +721,10 @@ async function eveningReminder() {
         for (const emp of needRemind) {
             const sched = await getActiveSchedule(emp.user_id);
             if (sched && ['vacation','sick','dayoff'].includes(sched.status)) continue;
+
+            // Проверяем тип рабочего графика
+            const wsStatus = await getWorkScheduleStatus(emp.user_id);
+            if (wsStatus && wsStatus.isRest) continue;
 
             const message = `🌆 Рабочий день подходит к концу. Не забудь отметить уход.`;
             await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message);
@@ -701,6 +855,18 @@ async function registerCommands(domain, accessToken, botId) {
         { cmd:'admin_add',          title:'Добавить админа' },
         { cmd:'admin_remove',       title:'Удалить админа' },
         { cmd:'admin_list',         title:'Список админов' },
+        { cmd:'work_sched',         title:'Графики работы' },
+        { cmd:'ws_list',            title:'Список графиков' },
+        { cmd:'ws_assign',          title:'Назначить график' },
+        { cmd:'ws_remove',          title:'Удалить график' },
+        { cmd:'ws_type_5_2',        title:'График 5/2' },
+        { cmd:'ws_type_4_2',        title:'График 4/2' },
+        { cmd:'ws_type_2_2',        title:'График 2/2' },
+        { cmd:'ws_select_0',        title:'Выбрать сотрудника 1' },
+        { cmd:'ws_select_1',        title:'Выбрать сотрудника 2' },
+        { cmd:'ws_select_2',        title:'Выбрать сотрудника 3' },
+        { cmd:'ws_select_3',        title:'Выбрать сотрудника 4' },
+        { cmd:'ws_select_4',        title:'Выбрать сотрудника 5' },
     ];
     for (const c of cmds) {
         const r = await callBitrix(domain, accessToken, 'imbot.command.register', {
@@ -1133,7 +1299,16 @@ const progressText =
             const schedToday  = await getSchedulesToday();
             const schedIds    = new Set(schedToday.map(r => r.user_id));
             const presentIds  = new Set(present.map(r => r.user_id));
-            const absent      = allEmps.filter(e => !presentIds.has(e.user_id) && !schedIds.has(e.user_id));
+
+            // Проверяем тип рабочего графика для тех, кто не в расписании и не пришёл
+            const uncoveredIds = allEmps
+                .filter(e => !presentIds.has(e.user_id) && !schedIds.has(e.user_id))
+                .map(e => e.user_id);
+            const wsStatusMap = await getBatchWorkScheduleStatus(uncoveredIds, today);
+            const wsRestIds   = new Set([...wsStatusMap.entries()].filter(([,v]) => v.isRest).map(([k]) => k));
+            const wsRestToday = allEmps.filter(e => wsRestIds.has(e.user_id));
+            const absent      = allEmps.filter(e =>
+                !presentIds.has(e.user_id) && !schedIds.has(e.user_id) && !wsRestIds.has(e.user_id));
             let text = `📋 Отчёт за ${new Date().toLocaleDateString('ru-RU')}\n\n`;
             if (present.length) {
                 text += `✅ Явились (${present.length} чел.):\n`;
@@ -1148,6 +1323,13 @@ const progressText =
             if (schedToday.length) {
                 text += `\n📅 По расписанию:\n`;
                 schedToday.forEach(r => { text += `• ${r.user_name}: ${SCHED_LABELS[r.status]||r.status}\n`; });
+            }
+            if (wsRestToday.length) {
+                text += `\n🗓 Выходной по графику:\n`;
+                wsRestToday.forEach(e => {
+                    const ws = wsStatusMap.get(e.user_id);
+                    text += `• ${e.user_name} (${ws?.scheduleType || ''})\n`;
+                });
             }
             if (absent.length) {
                 text += `\n❌ Не отметились (${absent.length} чел.):\n`;
@@ -1253,6 +1435,81 @@ const progressText =
             await setPending(FROM_USER_ID, 'admin_remove', 'user_id', { adminSession:true });
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `➖ Удаление администратора\n\n${admins.map(a=>`• ${a.user_name||'Без имени'} — ID: ${a.user_id}`).join('\n')}\n\nВведи ID для удаления:`, kbCancel());
+
+        } else if (action === 'work_sched') {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const allWs = await getAllEmpWorkSchedules();
+            let text = `📊 Управление типами рабочих графиков\n\n`;
+            text += allWs.length ? `👥 Назначено: ${allWs.length} чел.\n\n` : `Графики пока не назначены.\n\n`;
+            text += `Выбери действие:`;
+            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbWorkSched());
+
+        } else if (action === 'ws_list') {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const allWs = await getAllEmpWorkSchedules();
+            let text = `📋 Типы рабочих графиков:\n\n`;
+            if (allWs.length) {
+                allWs.forEach(ws => { text += `• ${ws.user_name}: ${formatWorkScheduleInfo(ws)}\n`; });
+            } else {
+                text += `Нет назначенных графиков.\nВсем применяется стандартная логика (пн–пт рабочие).`;
+            }
+            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbWorkSched());
+
+        } else if (action === 'ws_assign') {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            await setPending(FROM_USER_ID, 'ws_assign', 'search_user', { adminSession:true });
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `➕ Назначение типа рабочего графика\n\n🔍 Введи имя или фамилию сотрудника:`, kbCancel());
+
+        } else if (action === 'ws_remove') {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            await setPending(FROM_USER_ID, 'ws_remove', 'search_user', { adminSession:true });
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `❌ Удаление типа рабочего графика\n\n🔍 Введи имя или фамилию сотрудника:`, kbCancel());
+
+        } else if (/^ws_type_/.test(action) && pending?.action === 'ws_assign') {
+            // Команда: ws_type_5_2 / ws_type_4_2 / ws_type_2_2
+            const type = action.replace('ws_type_', '').replace('_', '/');
+            if (!WORK_SCHEDULE_TYPES[type]) {
+                await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Неизвестный тип. Попробуй снова.`, kbWorkSched()); return;
+            }
+            const data = pending.data;
+            if (type === '5/2') {
+                // Для 5/2 опорная дата не нужна — сохраняем сегодня
+                const today = new Date().toLocaleDateString('sv-SE', { timeZone:'Asia/Yekaterinburg' });
+                await setEmpWorkSchedule(data.userId, data.userName, type, today, FROM_USER_ID);
+                await clearPending(FROM_USER_ID);
+                await setPending(FROM_USER_ID, 'admin_session', 'active');
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    `✅ График назначен!\n\n👤 ${data.userName}\n📊 ${WORK_SCHEDULE_TYPES[type].label}\n\nВыходные — суббота и воскресенье.`,
+                    kbWorkSched());
+            } else {
+                await setPending(FROM_USER_ID, 'ws_assign', 'cycle_start', { ...data, scheduleType: type });
+                await sendMessage(domain, authToken, botId, DIALOG_ID,
+                    `📊 График: ${WORK_SCHEDULE_TYPES[type].label}\n\n` +
+                    `📅 Введи дату первого рабочего дня цикла (ДД.ММ.ГГГГ):\n\n` +
+                    `Пример: если цикл начался в понедельник — введи дату того понедельника.`,
+                    kbCancel());
+            }
+
+        } else if (/^ws_select_/.test(action) && pending?.action === 'ws_assign') {
+            const idx = parseInt(action.replace('ws_select_', ''));
+            const sel = (pending.data.foundUsers || [])[idx];
+            if (!sel) { await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Сотрудник не найден.`, kbCancel()); return; }
+            await setPending(FROM_USER_ID, 'ws_assign', 'pick_type', { ...pending.data, userId: sel.id, userName: sel.name });
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `👤 Сотрудник: ${sel.name}\n\n📊 Выбери тип рабочего графика:`, kbWorkSchedType());
+
+        } else if (/^ws_select_/.test(action) && pending?.action === 'ws_remove') {
+            const idx = parseInt(action.replace('ws_select_', ''));
+            const sel = (pending.data.foundUsers || [])[idx];
+            if (!sel) { await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Сотрудник не найден.`, kbCancel()); return; }
+            const removed = await removeEmpWorkSchedule(sel.id);
+            await clearPending(FROM_USER_ID);
+            await setPending(FROM_USER_ID, 'admin_session', 'active');
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                removed ? `✅ График сотрудника ${sel.name} удалён.` : `ℹ️ У ${sel.name} не был назначен тип графика.`,
+                kbWorkSched());
 
         } else {
             const greetings = ['привет','hello','hi','хай','здравствуй','здравствуйте','добрый день','добрый вечер','доброе утро','добрый','ку','хэй','салют','даров','дарова'];
@@ -1370,6 +1627,71 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         if (!id) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Введи числовой ID записи:`, kbCancel()); return; }
         const { rowCount } = await pool.query(`DELETE FROM schedules WHERE id=$1`, [id]);
         await done(rowCount ? `✅ Запись #${id} удалена.` : `❌ Запись #${id} не найдена.`, kbSchedule());
+        return;
+    }
+
+    // ── Назначение типа графика: поиск сотрудника ──
+    if (action === 'ws_assign' && step === 'search_user') {
+        await sendMessage(domain, authToken, botId, dialogId, `🔍 Ищу "${val}"...`, null);
+        const users = await searchBitrixUsers(domain, authToken, val);
+        if (!users.length) {
+            await sendMessage(domain, authToken, botId, dialogId, `❌ Сотрудник "${val}" не найден. Попробуй другое имя:`, kbCancel());
+            return;
+        }
+        if (users.length === 1) {
+            await setPending(userId, 'ws_assign', 'pick_type', { ...data, userId: users[0].id, userName: users[0].name });
+            await sendMessage(domain, authToken, botId, dialogId,
+                `👤 Найден: ${users[0].name}\n\n📊 Выбери тип рабочего графика:`, kbWorkSchedType());
+            return;
+        }
+        await setPending(userId, 'ws_assign', 'pick_user_then_type', { ...data, foundUsers: users });
+        const btns = users.slice(0, 5).flatMap((u, i) => {
+            const line = (i > 0 && i % 2 === 0) ? [{ TYPE:'NEWLINE' }] : [];
+            return [...line, { TEXT: u.name, COMMAND: `ws_select_${i}`, COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' }];
+        }).concat([{ TYPE:'NEWLINE' }, { TEXT:'❌ Отмена', COMMAND:'cancel_input', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' }]);
+        await sendMessage(domain, authToken, botId, dialogId,
+            `🔍 Найдено несколько:\n${users.slice(0,5).map((u,i)=>`${i+1}. ${u.name}`).join('\n')}\n\nВыбери:`, btns);
+        return;
+    }
+
+    // ── Назначение типа графика: ввод даты начала цикла ──
+    if (action === 'ws_assign' && step === 'cycle_start') {
+        const d = parseDate(val);
+        if (!d) {
+            await sendMessage(domain, authToken, botId, dialogId, `⚠️ Неверный формат. Введи ДД.ММ.ГГГГ, например: 01.04.2026`, kbCancel());
+            return;
+        }
+        await setEmpWorkSchedule(data.userId, data.userName, data.scheduleType, d, userId);
+        const typeInfo = WORK_SCHEDULE_TYPES[data.scheduleType];
+        const startRu  = new Date(d).toLocaleDateString('ru-RU');
+        await done(
+            `✅ График назначен!\n\n👤 ${data.userName}\n📊 ${typeInfo.label}\n📅 Начало цикла: ${startRu}\n\nВыходные дни будут корректно учтены в отчётах.`,
+            kbWorkSched());
+        return;
+    }
+
+    // ── Удаление типа графика: поиск сотрудника ──
+    if (action === 'ws_remove' && step === 'search_user') {
+        await sendMessage(domain, authToken, botId, dialogId, `🔍 Ищу "${val}"...`, null);
+        const users = await searchBitrixUsers(domain, authToken, val);
+        if (!users.length) {
+            await sendMessage(domain, authToken, botId, dialogId, `❌ Сотрудник "${val}" не найден. Попробуй другое имя:`, kbCancel());
+            return;
+        }
+        if (users.length === 1) {
+            const removed = await removeEmpWorkSchedule(users[0].id);
+            await done(
+                removed ? `✅ График сотрудника ${users[0].name} удалён.` : `ℹ️ У ${users[0].name} не был назначен тип графика.`,
+                kbWorkSched());
+            return;
+        }
+        await setPending(userId, 'ws_remove', 'pick_user', { ...data, foundUsers: users });
+        const btns = users.slice(0, 5).flatMap((u, i) => {
+            const line = (i > 0 && i % 2 === 0) ? [{ TYPE:'NEWLINE' }] : [];
+            return [...line, { TEXT: u.name, COMMAND: `ws_select_${i}`, COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#e05c5c', TEXT_COLOR:'#ffffff' }];
+        }).concat([{ TYPE:'NEWLINE' }, { TEXT:'❌ Отмена', COMMAND:'cancel_input', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' }]);
+        await sendMessage(domain, authToken, botId, dialogId,
+            `🔍 Найдено несколько:\n${users.slice(0,5).map((u,i)=>`${i+1}. ${u.name}`).join('\n')}\n\nВыбери сотрудника для удаления графика:`, btns);
         return;
     }
 
