@@ -1388,10 +1388,11 @@ const progressText =
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await sendMessage(domain, authToken, botId, DIALOG_ID, `🗓 Управление расписанием\n\nДобавь событие или посмотри список:`, kbSchedule());
         } else if (action === 'work_sched') {
-    if (!inAdminMode) {
-        await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb);
-        return;
-    }
+   // if (!inAdminMode) {
+//     await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb);
+//     return;
+// }
+    
 
     const allWs = await getAllEmpWorkSchedules();
 
@@ -1453,15 +1454,7 @@ const progressText =
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `➖ Удаление администратора\n\n${admins.map(a=>`• ${a.user_name||'Без имени'} — ID: ${a.user_id}`).join('\n')}\n\nВведи ID для удаления:`, kbCancel());
 
-        } else if (action === 'work_sched') {
-            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-            const allWs = await getAllEmpWorkSchedules();
-            let text = `📊 Управление типами рабочих графиков\n\n`;
-            text += allWs.length ? `👥 Назначено: ${allWs.length} чел.\n\n` : `Графики пока не назначены.\n\n`;
-            text += `Выбери действие:`;
-            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbWorkSched());
-
-        } else if (action === 'ws_list') {
+        }else if (action === 'ws_list') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const allWs = await getAllEmpWorkSchedules();
             let text = `📋 Типы рабочих графиков:\n\n`;
