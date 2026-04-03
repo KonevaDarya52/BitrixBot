@@ -1384,8 +1384,25 @@ const progressText =
                           : `❌ Не удалось отправить отчёт.\n\n_${result.error}_`, kbAdmin());
 
         } else if (action === 'schedule') {
+            
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await sendMessage(domain, authToken, botId, DIALOG_ID, `🗓 Управление расписанием\n\nДобавь событие или посмотри список:`, kbSchedule());
+        } else if (action === 'work_sched') {
+    if (!inAdminMode) {
+        await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb);
+        return;
+    }
+
+    const allWs = await getAllEmpWorkSchedules();
+
+    let text = `📊 Управление типами рабочих графиков\n\n`;
+    text += allWs.length 
+        ? `👥 Назначено: ${allWs.length} чел.\n\n` 
+        : `Графики пока не назначены.\n\n`;
+
+    text += `Выбери действие:`;
+
+    await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbWorkSched());
 
         } else if (['sched_vacation','sched_sick','sched_dayoff','sched_remote','sched_business'].includes(action)) {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
@@ -1467,7 +1484,10 @@ const progressText =
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `❌ Удаление типа рабочего графика\n\n🔍 Введи имя или фамилию сотрудника:`, kbCancel());
 
-        } else if (/^ws_type_/.test(action) && pending?.action === 'ws_assign') {
+        }else if (
+    /^ws_type_/.test(action) &&
+    pending?.action === 'ws_assign' &&
+    pending?.step === 'pick_type'){
             // Команда: ws_type_5_2 / ws_type_4_2 / ws_type_2_2
             const type = action.replace('ws_type_', '').replace('_', '/');
             if (!WORK_SCHEDULE_TYPES[type]) {
