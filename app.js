@@ -9,16 +9,22 @@ const app  = express();
 const port = process.env.PORT || 10000;
 
 const APP_DOMAIN    = process.env.APP_DOMAIN           || 'bitrixbot-bnnd.onrender.com';
-const BITRIX_DOMAIN = process.env.BITRIX_DOMAIN        || 'b24-cviqlp.bitrix24.ru';
-const CLIENT_ID     = process.env.BITRIX_CLIENT_ID     || 'local.699ef5d96dc8a3.90486015';
-const CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET || 'mBn7t9j3UF53bEOpp0fQ5S5favymHeguNh1d72U4E0KOaNb3kQ';
-const OFFICE_LAT    = parseFloat(process.env.OFFICE_LAT    || '57.151929');
-const OFFICE_LON    = parseFloat(process.env.OFFICE_LON    || '65.592076');
+const BITRIX_DOMAIN = process.env.BITRIX_DOMAIN        || '';
+const CLIENT_ID     = process.env.BITRIX_CLIENT_ID     || '';
+const CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET || '';
+const OFFICE_LAT    = parseFloat(process.env.OFFICE_LAT    || '');
+const OFFICE_LON    = parseFloat(process.env.OFFICE_LON    || '');
 const OFFICE_RADIUS = parseInt(process.env.OFFICE_RADIUS   || '100');
 // Второй офис/филиал (опционально — если не заданы, не используется)
 const OFFICE2_LAT   = process.env.OFFICE2_LAT ? parseFloat(process.env.OFFICE2_LAT) : null;
 const OFFICE2_LON   = process.env.OFFICE2_LON ? parseFloat(process.env.OFFICE2_LON) : null;
 const OFFICE2_NAME  = process.env.OFFICE2_NAME || 'Филиал';
+const OFFICE3_LAT   = process.env.OFFICE3_LAT ? parseFloat(process.env.OFFICE3_LAT) : null;
+const OFFICE3_LON   = process.env.OFFICE3_LON ? parseFloat(process.env.OFFICE3_LON) : null;
+const OFFICE3_NAME  = process.env.OFFICE3_NAME || 'Офис 3';
+const OFFICE4_LAT   = process.env.OFFICE4_LAT ? parseFloat(process.env.OFFICE4_LAT) : null;
+const OFFICE4_LON   = process.env.OFFICE4_LON ? parseFloat(process.env.OFFICE4_LON) : null;
+const OFFICE4_NAME  = process.env.OFFICE4_NAME || 'Офис 4';
 const MANAGER_ID    = process.env.MANAGER_USER_ID          || '1';
 const reportEmailsRaw = process.env.REPORT_EMAIL || '';
 const reportEmails = reportEmailsRaw.split(',').map(e => e.trim()).filter(e => e);
@@ -94,15 +100,24 @@ function getDistance(lat1, lon1, lat2, lon2) {
 }
 
 function checkOffice(lat, lon) {
-    const d1 = getDistance(lat, lon, OFFICE_LAT, OFFICE_LON);
-    if (d1 <= OFFICE_RADIUS) return { inOffice: true, officeName: 'Офис' };
-    if (OFFICE2_LAT !== null && OFFICE2_LON !== null) {
-        const d2 = getDistance(lat, lon, OFFICE2_LAT, OFFICE2_LON);
-        if (d2 <= OFFICE_RADIUS) return { inOffice: true, officeName: OFFICE2_NAME };
+    // Собираем все офисы из переменных окружения
+    const offices = [
+        { lat: OFFICE_LAT, lon: OFFICE_LON, name: 'Офис' },
+    ];
+    
+    if (OFFICE2_LAT && OFFICE2_LON) offices.push({ lat: OFFICE2_LAT, lon: OFFICE2_LON, name: OFFICE2_NAME || 'Филиал' });
+    if (OFFICE3_LAT && OFFICE3_LON) offices.push({ lat: OFFICE3_LAT, lon: OFFICE3_LON, name: OFFICE3_NAME || 'Офис 3' });
+    if (OFFICE4_LAT && OFFICE4_LON) offices.push({ lat: OFFICE4_LAT, lon: OFFICE4_LON, name: OFFICE4_NAME || 'Офис 4' });
+    // можно добавить и OFFICE5... и так далее
+    
+    for (const office of offices) {
+        const distance = getDistance(lat, lon, office.lat, office.lon);
+        if (distance <= OFFICE_RADIUS) {
+            return { inOffice: true, officeName: office.name };
+        }
     }
     return { inOffice: false, officeName: null };
 }
-
 function makeToken() {
     return Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
