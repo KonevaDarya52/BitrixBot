@@ -1260,7 +1260,7 @@ if (sched && sched.status === 'remote') {
             for (const mark of marks) {
                 const ts  = new Date(mark.timestamp);
                 const lbl = mark.type === 'in' ? '✅ Приход' : '🚪 Уход';
-                const loc = mark.in_office ? '📍 В офисе' : '⚠️ Вне офиса';
+                const loc = mark.in_office === 1 ? '📍 В офисе' : '🏠 Удалённо';
                 if (mark.type === 'in') {
                     lastInTime = ts; lastType = 'in';
                     lines.push(`${lbl} в ${tzTime(mark.timestamp)} — ${loc}`);
@@ -1302,55 +1302,57 @@ const progressText =
             await sendMessage(domain, authToken, botId, DIALOG_ID, `👇 Выбери нужное действие:`, kb);
 
         } else if (action === 'report_today') {
-            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-            const today = todaySV();
-            const { rows: present } = await pool.query(`
-                SELECT user_name, user_id,
-                    MIN(CASE WHEN type='in' THEN timestamp END) as in_time,
-                    MAX(CASE WHEN type='out' THEN timestamp END) as out_time
-                FROM attendance WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date=$1::date
-                GROUP BY user_id, user_name ORDER BY user_name`, [today]);
-            const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
-            const schedToday  = await getSchedulesToday();
-            const schedIds    = new Set(schedToday.map(r => r.user_id));
-            const presentIds  = new Set(present.map(r => r.user_id));
-
-            // Проверяем тип рабочего графика для тех, кто не в расписании и не пришёл
-            const uncoveredIds = allEmps
-                .filter(e => !presentIds.has(e.user_id) && !schedIds.has(e.user_id))
-                .map(e => e.user_id);
-            const wsStatusMap = await getBatchWorkScheduleStatus(uncoveredIds, today);
-            const wsRestIds   = new Set([...wsStatusMap.entries()].filter(([,v]) => v.isRest).map(([k]) => k));
-            const wsRestToday = allEmps.filter(e => wsRestIds.has(e.user_id));
-            const absent      = allEmps.filter(e =>
-                !presentIds.has(e.user_id) && !schedIds.has(e.user_id) && !wsRestIds.has(e.user_id));
-            let text = `📋 Отчёт за ${new Date().toLocaleDateString('ru-RU')}\n\n`;
-            if (present.length) {
-                text += `✅ Явились (${present.length} чел.):\n`;
-                present.forEach(r => {
-    const locationLabel = r.in_office === 1 ? '🏢 в офисе' : '🏠 удалённо';
-
-    text += `• ${r.user_name || r.user_id}: ${locationLabel} ${
-        r.in_time ? tzTime(r.in_time) : '?'
-    } → ${r.out_time ? tzTime(r.out_time) : '🟢 работает'}\n`;
-});
-            } else { text += `Сегодня отметок нет.\n`; }
-            if (schedToday.length) {
-                text += `\n📅 По расписанию:\n`;
-                schedToday.forEach(r => { text += `• ${r.user_name}: ${SCHED_LABELS[r.status]||r.status}\n`; });
-            }
-            if (wsRestToday.length) {
-                text += `\n🗓 Выходной по графику:\n`;
-                wsRestToday.forEach(e => {
-                    const ws = wsStatusMap.get(e.user_id);
-                    text += `• ${e.user_name} (${ws?.scheduleType || ''})\n`;
-                });
-            }
-            if (absent.length) {
-                text += `\n❌ Не отметились (${absent.length} чел.):\n`;
-                absent.forEach(r => { text += `• ${r.user_name}\n`; });
-            }
-            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
+    if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+    const today = todaySV();
+    
+    // Исправленный запрос с in_office
+    const { rows: present } = await pool.query(`
+        SELECT 
+            user_name, 
+            user_id,
+            MIN(CASE WHEN type='in' THEN timestamp END) as in_time,
+            MAX(CASE WHEN type='out' THEN timestamp END) as out_time,
+            (SELECT in_office FROM attendance a2 
+             WHERE a2.user_id = attendance.user_id 
+               AND a2.type = 'in'
+               AND (a2.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1::date
+             ORDER BY a2.timestamp DESC LIMIT 1) as in_office
+        FROM attendance
+        WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1::date
+        GROUP BY user_id, user_name
+        ORDER BY user_name
+    `, [today]);
+    
+    const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
+    const schedToday = await getSchedulesToday();
+    const schedIds = new Set(schedToday.map(r => r.user_id));
+    const presentIds = new Set(present.map(r => r.user_id));
+    const absent = allEmps.filter(e => !presentIds.has(e.user_id) && !schedIds.has(e.user_id));
+    
+    let text = `📋 Отчёт за ${new Date().toLocaleDateString('ru-RU')}\n\n`;
+    
+    if (present.length) {
+        text += `✅ Явились (${present.length} чел.):\n`;
+        present.forEach(r => {
+            const locationLabel = (r.in_office === 0) ? '🏠 удалённо' : '🏢 в офисе';
+            const statusIcon = r.out_time ? '🔵 завершил' : '🟢 работает';
+            text += `• ${r.user_name || r.user_id}: ${locationLabel} ${r.in_time ? tzTime(r.in_time) : '?'} → ${statusIcon}\n`;
+        });
+    } else { 
+        text += `Сегодня отметок нет.\n`; 
+    }
+    
+    if (schedToday.length) {
+        text += `\n📅 По расписанию:\n`;
+        schedToday.forEach(r => { text += `• ${r.user_name}: ${SCHED_LABELS[r.status] || r.status}\n`; });
+    }
+    
+    if (absent.length) {
+        text += `\n❌ Не отметились (${absent.length} чел.):\n`;
+        absent.forEach(r => { text += `• ${r.user_name}\n`; });
+    }
+    
+    await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
         } else if (action === 'report_week') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
@@ -1377,10 +1379,14 @@ const progressText =
         } else if (action === 'who_in') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             const { rows } = await pool.query(`
-                SELECT user_name, user_id, MIN(CASE WHEN type='in' THEN timestamp END) as in_time
-                FROM attendance
-                WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date=(NOW() AT TIME ZONE 'Asia/Yekaterinburg')::date
-                GROUP BY user_id, user_name HAVING MAX(CASE WHEN type='out' THEN 1 ELSE 0 END)=0 ORDER BY user_name`);
+    SELECT user_name, user_id, MIN(CASE WHEN type='in' THEN timestamp END) as in_time
+    FROM attendance
+    WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = (NOW() AT TIME ZONE 'Asia/Yekaterinburg')::date
+      AND in_office = 1
+    GROUP BY user_id, user_name 
+    HAVING MAX(CASE WHEN type='out' THEN 1 ELSE 0 END) = 0 
+    ORDER BY user_name
+`);
             let text = `👥 Сейчас в офисе — ${rows.length} чел.:\n\n`;
             rows.length ? rows.forEach(r => { text += `• ${r.user_name||r.user_id} (с ${r.in_time ? tzTime(r.in_time) : '?'})\n`; })
                         : text += `Сейчас никого нет в офисе.`;
