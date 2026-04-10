@@ -669,7 +669,12 @@ async function getPortal(domain) {
 
 // Возвращает данные первого активного портала (домен, токен, botId)
 async function getActivePortal() {
-    const { rows } = await pool.query(`SELECT domain, access_token, bot_id FROM portals LIMIT 1`);
+    const { rows } = await pool.query(`
+        SELECT domain, access_token, bot_id 
+        FROM portals 
+        ORDER BY updated_at DESC 
+        LIMIT 1
+    `);
     if (!rows.length) throw new Error('Нет зарегистрированного портала');
     return { domain: rows[0].domain, accessToken: rows[0].access_token, botId: rows[0].bot_id };
 }
@@ -819,6 +824,38 @@ async function sendMessage(domain, accessToken, botId, dialogId, message, keyboa
     return r;
 }
 
+async function sendMessageWithRetry(domain, accessToken, botId, dialogId, message, keyboard, retries = 2) {
+    let currentToken = accessToken;
+    
+    for (let i = 0; i < retries; i++) {
+        const result = await sendMessage(domain, currentToken, botId, dialogId, message, keyboard);
+        
+        // Если успешно — возвращаем результат
+        if (result?.result !== false) return result;
+        
+        // Если ошибка — пробуем обновить токен
+        console.log(`🔄 Попытка ${i + 1} не удалась, обновляем токен...`);
+        
+        const portal = await getPortal(domain);
+        if (portal?.refresh_token) {
+            const newToken = await doRefreshToken(domain, portal.refresh_token);
+            if (newToken) {
+                currentToken = newToken;
+                console.log(`✅ Токен обновлён, повторяем попытку ${i + 2}`);
+                continue;
+            }
+        }
+        
+        // Если обновить не удалось — ждём и пробуем ещё раз
+        await new Promise(r => setTimeout(r, 1000));
+    }
+    
+    console.error(`❌ Не удалось отправить сообщение после ${retries} попыток`);
+    return null;
+}
+
+
+
 // Уведомление сотруднику в его личный чат с ботом.
 // dialog_id берём из таблицы employees — он сохраняется при первом открытии чата.
 async function notifyUserInBotChat(domain, accessToken, botId, targetUserId, message) {
@@ -828,7 +865,7 @@ async function notifyUserInBotChat(domain, accessToken, botId, targetUserId, mes
         return null;
     }
     console.log(`📣 notifyUser → userId=${targetUserId}, dialog=${dialogId}`);
-    return sendMessage(domain, accessToken, botId, dialogId, message, null);
+    return sendMessageWithRetry(domain, accessToken, botId, dialogId, message, null);
 }
 
 // ─── Регистрация команд ───────────────────────────────────────────────────────

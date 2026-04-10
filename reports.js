@@ -274,11 +274,9 @@ async function buildWeekSheet(workbook, pool) {
     }
 
     // ── Рабочие дни (пн–пт) ──
-    const workDates = allDates.filter(d => {
-        const wd = new Date(d).getDay();
-        return wd >= 1 && wd <= 5;
-    });
-    const workDaysCount = workDates.length;
+// ── Все дни недели (включая субботу и воскресенье) ──
+const workDates = [...allDates];
+const workDaysCount = workDates.length;
 
     const dayNames = ['Вс','Пн','Вт','Ср','Чт','Пт','Сб'];
     const monthNames = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
@@ -521,14 +519,14 @@ async function buildMonthSheet(workbook, pool) {
     }
 
     // Рабочие дни (пн–пт) за период
-    const allDates  = dateRange(days);
-    const workDates = allDates.filter(d => { const w = new Date(d).getDay(); return w >= 1 && w <= 5; });
-    const workDaysCount = workDates.length;
+   const allDates  = dateRange(days);
+const workDates = [...allDates];
+const workDaysCount = workDates.length;
 
     // Разбивка по неделям (для детализации)
     const weeks = [];
-    for (let i = 0; i < workDates.length; i += 5) {
-        weeks.push(workDates.slice(i, i + 5));
+    for (let i = 0; i < workDates.length; i += 7) {
+        weeks.push(workDates.slice(i, i + 7));
     }
 
     // ── Создаём лист ──
