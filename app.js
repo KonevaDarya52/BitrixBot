@@ -210,21 +210,26 @@ function isRestDayBySchedule(scheduleType, cycleStart, date) {
 }
 
 /** Получить тип графика сотрудника из БД */
-async function getEmpWorkSchedule(userId) {
-    const { rows } = await pool.query(
-        `SELECT * FROM employee_work_schedules WHERE user_id = $1`, [String(userId)]);
+async function getEmpWorkSchedule(userId, checkDate = null) {
+    const today = checkDate || todaySV();
+    const { rows } = await pool.query(`
+        SELECT * FROM employee_work_schedules 
+        WHERE user_id = $1 
+          AND (date_end IS NULL OR date_end >= $2)
+    `, [String(userId), today]);
     return rows[0] || null;
 }
 
 /** Статус дня для сотрудника: { isRest, scheduleType, label } | null */
 async function getWorkScheduleStatus(userId, date) {
-    const ws = await getEmpWorkSchedule(userId);
+    const checkDate = date || todaySV();
+    const ws = await getEmpWorkSchedule(userId, checkDate);
     if (!ws) return null;
-    const rest = isRestDayBySchedule(ws.schedule_type, ws.cycle_start, date || todaySV());
+    const rest = isRestDayBySchedule(ws.schedule_type, ws.cycle_start, checkDate);
     return {
-        isRest:       rest,
+        isRest: rest,
         scheduleType: ws.schedule_type,
-        label:        rest ? `🗓 Выходной по графику (${ws.schedule_type})` : null,
+        label: rest ? `🗓 Выходной по графику (${ws.schedule_type})` : null,
     };
 }
 
@@ -256,14 +261,18 @@ async function getBatchWorkScheduleForDates(userIds, dates) {
 }
 
 /** Назначить/обновить тип графика сотрудника */
-async function setEmpWorkSchedule(userId, userName, scheduleType, cycleStart, assignedBy) {
+async function setEmpWorkSchedule(userId, userName, scheduleType, cycleStart, dateEnd, assignedBy) {
     await pool.query(`
-        INSERT INTO employee_work_schedules (user_id, user_name, schedule_type, cycle_start, assigned_by, assigned_at, updated_at)
-        VALUES ($1,$2,$3,$4,$5,NOW(),NOW())
+        INSERT INTO employee_work_schedules (user_id, user_name, schedule_type, cycle_start, date_end, assigned_by, assigned_at, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,NOW(),NOW())
         ON CONFLICT (user_id) DO UPDATE SET
-            user_name=EXCLUDED.user_name, schedule_type=EXCLUDED.schedule_type,
-            cycle_start=EXCLUDED.cycle_start, assigned_by=EXCLUDED.assigned_by, updated_at=NOW()
-    `, [String(userId), userName, scheduleType, cycleStart, assignedBy || null]);
+            user_name = EXCLUDED.user_name,
+            schedule_type = EXCLUDED.schedule_type,
+            cycle_start = EXCLUDED.cycle_start,
+            date_end = EXCLUDED.date_end,
+            assigned_by = EXCLUDED.assigned_by,
+            updated_at = NOW()
+    `, [String(userId), userName, scheduleType, cycleStart, dateEnd || null, assignedBy || null]);
 }
 
 /** Удалить тип графика у сотрудника */
@@ -284,6 +293,31 @@ function formatWorkScheduleInfo(ws) {
     const info   = WORK_SCHEDULE_TYPES[ws.schedule_type];
     const startRu = new Date(ws.cycle_start).toLocaleDateString('ru-RU');
     return `${info?.label || ws.schedule_type} (цикл с ${startRu})`;
+}
+
+async function shouldSendReminder(userId) {
+    const today = todaySV();
+    
+    // 1. Проверяем расписание (отпуск, больничный, выходной)
+    const sched = await getActiveSchedule(userId);
+    if (sched && ['vacation', 'sick', 'dayoff'].includes(sched.status)) {
+        console.log(`📅 ${userId} — сегодня на расписании (${sched.status}), напоминание не нужно`);
+        return false;
+    }
+    
+    // 2. Проверяем тип рабочего графика
+    const wsStatus = await getWorkScheduleStatus(userId, today);
+    
+    // 3. Если есть график и сегодня выходной — не отправляем
+    if (wsStatus && wsStatus.isRest) {
+        console.log(`📅 ${userId} — выходной по графику ${wsStatus.scheduleType}, напоминание не нужно`);
+        return false;
+    }
+    
+    // 4. Если графика нет — отправляем каждый день (включая субботу и воскресенье)
+    // 5. Если график есть и сегодня рабочий день — отправляем
+    
+    return true;
 }
 
 // ─── Администраторы ───────────────────────────────────────────────────────────
@@ -699,17 +733,10 @@ async function morningReminder() {
                 LIMIT 1
             `, [emp.user_id, today]);
             if (marked.length > 0) continue;
-
-            // На расписании (отпуск, больничный, выходной)?
-            const sched = await getActiveSchedule(emp.user_id);
-            if (sched && ['vacation','sick','dayoff'].includes(sched.status)) continue;
-
-            // Проверяем тип рабочего графика (4/2, 2/2 — может быть выходной)
-            const wsStatus = await getWorkScheduleStatus(emp.user_id);
-            if (wsStatus && wsStatus.isRest) {
-                console.log(`📅 ${emp.user_name} — выходной по графику ${wsStatus.scheduleType}`);
-                continue;
-            }
+            
+            // Проверяем, нужно ли отправлять напоминание
+            const shouldSend = await shouldSendReminder(emp.user_id);
+            if (!shouldSend) continue;
 
             const message = `🌅 Доброе утро! Не забудь отметить приход на работе.`;
             await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message);
@@ -740,12 +767,9 @@ async function eveningReminder() {
         `, [today]);
 
         for (const emp of needRemind) {
-            const sched = await getActiveSchedule(emp.user_id);
-            if (sched && ['vacation','sick','dayoff'].includes(sched.status)) continue;
-
-            // Проверяем тип рабочего графика
-            const wsStatus = await getWorkScheduleStatus(emp.user_id);
-            if (wsStatus && wsStatus.isRest) continue;
+            // Проверяем, нужно ли отправлять напоминание
+            const shouldSend = await shouldSendReminder(emp.user_id);
+            if (!shouldSend) continue;
 
             const message = `🌆 Рабочий день подходит к концу. Не забудь отметить уход.`;
             await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message);
@@ -1536,35 +1560,42 @@ const progressText =
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `❌ Удаление типа рабочего графика\n\n🔍 Введи имя или фамилию сотрудника:`, kbCancel());
 
-        }else if (
+} else if (
     /^ws_type_/.test(action) &&
     pending?.action === 'ws_assign' &&
     pending?.step === 'pick_type'){
-            // Команда: ws_type_5_2 / ws_type_4_2 / ws_type_2_2
-            const type = action.replace('ws_type_', '').replace('_', '/');
-            if (!WORK_SCHEDULE_TYPES[type]) {
-                await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Неизвестный тип. Попробуй снова.`, kbWorkSched()); return;
-            }
-            const data = pending.data;
-            if (type === '5/2') {
-                // Для 5/2 опорная дата не нужна — сохраняем сегодня
-                const today = new Date().toLocaleDateString('sv-SE', { timeZone:'Asia/Yekaterinburg' });
-                await setEmpWorkSchedule(data.userId, data.userName, type, today, FROM_USER_ID);
-                await clearPending(FROM_USER_ID);
-                await setPending(FROM_USER_ID, 'admin_session', 'active');
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `✅ График назначен!\n\n👤 ${data.userName}\n📊 ${WORK_SCHEDULE_TYPES[type].label}\n\nВыходные — суббота и воскресенье.`,
-                    kbWorkSched());
-            } else {
-                await setPending(FROM_USER_ID, 'ws_assign', 'cycle_start', { ...data, scheduleType: type });
-                await sendMessage(domain, authToken, botId, DIALOG_ID,
-                    `📊 График: ${WORK_SCHEDULE_TYPES[type].label}\n\n` +
-                    `📅 Введи дату первого рабочего дня цикла (ДД.ММ.ГГГГ):\n\n` +
-                    `Пример: если цикл начался в понедельник — введи дату того понедельника.`,
-                    kbCancel());
-            }
-
-        } else if (/^ws_select_/.test(action) && pending?.action === 'ws_assign') {
+    // Команда: ws_type_5_2 / ws_type_4_2 / ws_type_2_2
+    const type = action.replace('ws_type_', '').replace('_', '/');
+    if (!WORK_SCHEDULE_TYPES[type]) {
+        await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Неизвестный тип. Попробуй снова.`, kbWorkSched());
+        return;
+    }
+    const data = pending.data;
+    
+    if (type === '5/2') {
+        // Для 5/2 опорная дата не нужна — сохраняем сегодня
+        const today = new Date().toLocaleDateString('sv-SE', { timeZone:'Asia/Yekaterinburg' });
+        // Переходим к вопросу о дате окончания
+        await setPending(FROM_USER_ID, 'ws_assign', 'date_end', { 
+            ...data, 
+            scheduleType: type, 
+            cycleStart: today 
+        });
+        await sendMessage(domain, authToken, botId, DIALOG_ID,
+            `📊 График: ${WORK_SCHEDULE_TYPES[type].label}\n\n` +
+            `📅 Введи дату окончания графика (ДД.ММ.ГГГГ) или *-* если бессрочно:`,
+            kbCancel());
+    } else {
+        // Для 4/2 и 2/2 сначала запрашиваем дату начала цикла
+        await setPending(FROM_USER_ID, 'ws_assign', 'cycle_start', { ...data, scheduleType: type });
+        await sendMessage(domain, authToken, botId, DIALOG_ID,
+            `📊 График: ${WORK_SCHEDULE_TYPES[type].label}\n\n` +
+            `📅 Введи дату первого рабочего дня цикла (ДД.ММ.ГГГГ):\n\n` +
+            `Пример: если цикл начался в понедельник — введи дату того понедельника.`,
+            kbCancel());
+    }
+    return;
+} else if (/^ws_select_/.test(action) && pending?.action === 'ws_assign') {
             const idx = parseInt(action.replace('ws_select_', ''));
             const sel = (pending.data.foundUsers || [])[idx];
             if (!sel) { await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Сотрудник не найден.`, kbCancel()); return; }
@@ -1740,7 +1771,34 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
             `✅ График назначен!\n\n👤 ${data.userName}\n📊 ${typeInfo.label}\n📅 Начало цикла: ${startRu}\n\nВыходные дни будут корректно учтены в отчётах.`,
             kbWorkSched());
         return;
+
+    } else if (action === 'ws_assign' && step === 'date_end') {
+    let dateEnd = null;
+    if (val !== '-' && val !== '—') {
+        dateEnd = parseDate(val);
+        if (!dateEnd) {
+            await sendMessage(domain, authToken, botId, dialogId, 
+                `⚠️ Неверный формат. Введи ДД.ММ.ГГГГ или *-* для бессрочного графика:`, 
+                kbCancel());
+            return;
+        }
     }
+    
+    const typeInfo = WORK_SCHEDULE_TYPES[data.scheduleType];
+    const startRu = new Date(data.cycleStart).toLocaleDateString('ru-RU');
+    const endRu = dateEnd ? new Date(dateEnd).toLocaleDateString('ru-RU') : 'бессрочно';
+    
+    // Сохраняем график с датой окончания
+    await setEmpWorkSchedule(data.userId, data.userName, data.scheduleType, data.cycleStart, dateEnd, userId);
+    
+    await clearPending(userId);
+    if (data.adminSession) await setPending(userId, 'admin_session', 'active');
+    
+    await sendMessage(domain, authToken, botId, dialogId,
+        `✅ График назначен!\n\n👤 ${data.userName}\n📊 ${typeInfo.label}\n📅 Начало цикла: ${startRu}\n📅 Окончание: ${endRu}\n\nВыходные дни будут корректно учтены в отчётах и напоминаниях.`,
+        kbWorkSched());
+    return;
+}
 
     // ── Удаление типа графика: поиск сотрудника ──
     if (action === 'ws_remove' && step === 'search_user') {
@@ -1870,14 +1928,14 @@ cron.schedule('*/15 * * * *', async () => {
     console.log('🧹 Очистка');
 });
 
-// Утро в 9:00 Екатеринбург = 4:00 UTC
-cron.schedule('0 4 * * 1-5', async () => {
+// Утро в 9:00 Екатеринбург = 4:00 UTC — КАЖДЫЙ ДЕНЬ
+cron.schedule('0 4 * * *', async () => {
     console.log('⏰ Утреннее напоминание');
     await morningReminder();
 }, { timezone: 'UTC' });
 
-// Вечер в 18:00 Екатеринбург = 13:00 UTC
-cron.schedule('0 13 * * 1-5', async () => {
+// Вечер в 18:00 Екатеринбург = 13:00 UTC — КАЖДЫЙ ДЕНЬ
+cron.schedule('0 13 * * *', async () => {
     console.log('⏰ Вечернее напоминание об уходе');
     await eveningReminder();
 }, { timezone: 'UTC' });
