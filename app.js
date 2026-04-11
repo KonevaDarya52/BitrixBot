@@ -1640,8 +1640,6 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         await sendMessage(domain, authToken, botId, dialogId, text, kb || kbAdmin());
     }
 
-    
-
     if (action === 'admin_add') {
         const newId = val.replace(/\D/g,'');
         if (!newId) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Введи числовой ID, например: *123*`, kbCancel()); return; }
@@ -1710,7 +1708,6 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
             `✅ Запись добавлена в расписание!\n\n👤 ${data.userName}\n📋 ${label}\n📅 ${from} — ${to}` + (comment ? `\n💬 ${comment}` : ''),
             kbSchedule());
 
-        // Уведомляем сотрудника в его личный чат с ботом
         if (data.userId) {
             const portal = await getPortal(domain);
             if (portal?.bot_id) {
@@ -1757,48 +1754,57 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         return;
     }
 
-    // ── Назначение типа графика: ввод даты начала цикла ──
+    // ── Назначение типа графика: ввод даты начала цикла (для 4/2 и 2/2) ──
     if (action === 'ws_assign' && step === 'cycle_start') {
         const d = parseDate(val);
         if (!d) {
-            await sendMessage(domain, authToken, botId, dialogId, `⚠️ Неверный формат. Введи ДД.ММ.ГГГГ, например: 01.04.2026`, kbCancel());
-            return;
-        }
-        await setEmpWorkSchedule(data.userId, data.userName, data.scheduleType, d, userId);
-        const typeInfo = WORK_SCHEDULE_TYPES[data.scheduleType];
-        const startRu  = new Date(d).toLocaleDateString('ru-RU');
-        await done(
-            `✅ График назначен!\n\n👤 ${data.userName}\n📊 ${typeInfo.label}\n📅 Начало цикла: ${startRu}\n\nВыходные дни будут корректно учтены в отчётах.`,
-            kbWorkSched());
-        return;
-
-    } else if (action === 'ws_assign' && step === 'date_end') {
-    let dateEnd = null;
-    if (val !== '-' && val !== '—') {
-        dateEnd = parseDate(val);
-        if (!dateEnd) {
             await sendMessage(domain, authToken, botId, dialogId, 
-                `⚠️ Неверный формат. Введи ДД.ММ.ГГГГ или *-* для бессрочного графика:`, 
+                `⚠️ Неверный формат. Введи ДД.ММ.ГГГГ, например: 01.04.2026`, 
                 kbCancel());
             return;
         }
+        
+        // Сохраняем cycleStart и переходим к вопросу о дате окончания
+        await setPending(userId, 'ws_assign', 'date_end', { 
+            ...data, 
+            scheduleType: data.scheduleType, 
+            cycleStart: d 
+        });
+        
+        await sendMessage(domain, authToken, botId, dialogId,
+            `📅 Начало цикла: ${val}\n\n` +
+            `📅 Введи дату окончания графика (ДД.ММ.ГГГГ) или *-* если бессрочно:`,
+            kbCancel());
+        return;
     }
-    
-    const typeInfo = WORK_SCHEDULE_TYPES[data.scheduleType];
-    const startRu = new Date(data.cycleStart).toLocaleDateString('ru-RU');
-    const endRu = dateEnd ? new Date(dateEnd).toLocaleDateString('ru-RU') : 'бессрочно';
-    
-    // Сохраняем график с датой окончания
-    await setEmpWorkSchedule(data.userId, data.userName, data.scheduleType, data.cycleStart, dateEnd, userId);
-    
-    await clearPending(userId);
-    if (data.adminSession) await setPending(userId, 'admin_session', 'active');
-    
-    await sendMessage(domain, authToken, botId, dialogId,
-        `✅ График назначен!\n\n👤 ${data.userName}\n📊 ${typeInfo.label}\n📅 Начало цикла: ${startRu}\n📅 Окончание: ${endRu}\n\nВыходные дни будут корректно учтены в отчётах и напоминаниях.`,
-        kbWorkSched());
-    return;
-}
+
+    // ── Назначение типа графика: ввод даты окончания ──
+    if (action === 'ws_assign' && step === 'date_end') {
+        let dateEnd = null;
+        if (val !== '-' && val !== '—') {
+            dateEnd = parseDate(val);
+            if (!dateEnd) {
+                await sendMessage(domain, authToken, botId, dialogId, 
+                    `⚠️ Неверный формат. Введи ДД.ММ.ГГГГ или *-* для бессрочного графика:`, 
+                    kbCancel());
+                return;
+            }
+        }
+        
+        const typeInfo = WORK_SCHEDULE_TYPES[data.scheduleType];
+        const startRu = new Date(data.cycleStart).toLocaleDateString('ru-RU');
+        const endRu = dateEnd ? new Date(dateEnd).toLocaleDateString('ru-RU') : 'бессрочно';
+        
+        await setEmpWorkSchedule(data.userId, data.userName, data.scheduleType, data.cycleStart, dateEnd, userId);
+        
+        await clearPending(userId);
+        if (data.adminSession) await setPending(userId, 'admin_session', 'active');
+        
+        await sendMessage(domain, authToken, botId, dialogId,
+            `✅ График назначен!\n\n👤 ${data.userName}\n📊 ${typeInfo.label}\n📅 Начало цикла: ${startRu}\n📅 Окончание: ${endRu}\n\nВыходные дни будут корректно учтены в отчётах и напоминаниях.`,
+            kbWorkSched());
+        return;
+    }
 
     // ── Удаление типа графика: поиск сотрудника ──
     if (action === 'ws_remove' && step === 'search_user') {
@@ -1829,6 +1835,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
     if (pending.data?.adminSession) await setPending(userId, 'admin_session', 'active');
     await sendMessage(domain, authToken, botId, dialogId, `⚠️ Что-то пошло не так. Начни заново.`, kbAdmin());
 }
+
 
 // ─── Вспомогательные маршруты ─────────────────────────────────────────────────
 
