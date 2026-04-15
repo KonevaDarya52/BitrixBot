@@ -128,6 +128,72 @@ function formatDuration(seconds) {
     return `${h} ч ${m} мин`;
 }
 
+// Формирует отчёт по отметкам за последние days дней
+async function getUserHistory(userId, days) {
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - days + 1);
+    startDate.setHours(0,0,0,0);
+    endDate.setHours(23,59,59,999);
+
+    const { rows } = await pool.query(`
+        SELECT type, timestamp
+        FROM attendance
+        WHERE user_id = $1
+          AND timestamp >= $2
+          AND timestamp <= $3
+        ORDER BY timestamp
+    `, [userId, startDate, endDate]);
+
+    // Группируем по дням (по дате в Екатеринбурге)
+    const dayMap = new Map(); // key: YYYY-MM-DD, value: { inTime, outTime, totalSeconds }
+    for (const row of rows) {
+        const ts = new Date(row.timestamp);
+        const dateStr = ts.toLocaleDateString('sv-SE', { timeZone: 'Asia/Yekaterinburg' });
+        if (!dayMap.has(dateStr)) dayMap.set(dateStr, { inTime: null, outTime: null, totalSeconds: 0 });
+        const entry = dayMap.get(dateStr);
+        if (row.type === 'in') {
+            entry.inTime = ts;
+        } else if (row.type === 'out' && entry.inTime) {
+            entry.totalSeconds += (ts - entry.inTime) / 1000;
+            entry.inTime = null; // сбрасываем, чтобы не дублировать
+        }
+    }
+
+    // Преобразуем в массив и сортируем по дате
+    const daysArray = Array.from(dayMap.entries()).map(([date, data]) => ({
+        date,
+        hours: data.totalSeconds / 3600,
+    })).sort((a,b) => a.date.localeCompare(b.date));
+
+    return daysArray;
+}
+
+function formatHistoryText(daysArray, periodLabel) {
+    if (!daysArray.length) return `📊 За ${periodLabel} нет данных об отработанных часах.`;
+
+    const maxHours = 8; // норма часов в день
+    const barLength = 10; // максимальная длина графика в символах
+
+    let text = `📊 История за ${periodLabel}\n\n`;
+    text += `📅 Дата          Часы   График (${maxHours}ч)\n`;
+
+    for (const day of daysArray) {
+        const hours = day.hours;
+        const dateRu = new Date(day.date).toLocaleDateString('ru-RU');
+        const hoursStr = hours.toFixed(1).padStart(5, ' ');
+        const filled = Math.min(barLength, Math.round((hours / maxHours) * barLength));
+        const bar = '█'.repeat(filled) + '░'.repeat(barLength - filled);
+        text += `${dateRu}   ${hoursStr} ч   ${bar}\n`;
+    }
+
+    const totalHours = daysArray.reduce((sum, d) => sum + d.hours, 0);
+    const avgHours = (totalHours / daysArray.length).toFixed(1);
+    text += `\n📌 Итого: ${totalHours.toFixed(1)} ч за ${daysArray.length} дн. (сред. ${avgHours} ч/день)`;
+
+    return text;
+}
+
 async function getMonthWorkSeconds(userId) {
     const { rows } = await pool.query(`
         SELECT type, timestamp
@@ -549,6 +615,8 @@ function kbMain() {
         { TYPE:'NEWLINE' },
         { TEXT:'📊 Статус', COMMAND:'status',  COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
         { TEXT:'❓ Помощь', COMMAND:'help',    COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'📈 История', COMMAND:'history_menu', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#f39c12', TEXT_COLOR:'#ffffff' },
     ];
 }
 
@@ -561,6 +629,8 @@ function kbMainAdmin() {
         { TEXT:'❓ Помощь', COMMAND:'help',    COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
         { TYPE:'NEWLINE' },
         { TEXT:'🔐 Режим администратора', COMMAND:'admin_enter', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#7b4fa6', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'📈 История', COMMAND:'history_menu', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#f39c12', TEXT_COLOR:'#ffffff' },
     ];
 }
 
@@ -680,6 +750,15 @@ function kbMorningReminder() {
 function kbEveningReminder() {
     return [
         { TEXT:'🚪 Ушёл', COMMAND:'left', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#e05c5c', TEXT_COLOR:'#ffffff' }
+    ];
+}
+
+function kbHistoryPeriod() {
+    return [
+        { TEXT:'📅 За неделю', COMMAND:'history_week', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
+        { TEXT:'📆 За месяц',  COMMAND:'history_month', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#3a7bd5', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'◀️ Назад',     COMMAND:'menu', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
     ];
 }
 
@@ -956,6 +1035,9 @@ async function registerCommands(domain, accessToken, botId) {
         { cmd:'ws_select_2',        title:'Выбрать сотрудника 3' },
         { cmd:'ws_select_3',        title:'Выбрать сотрудника 4' },
         { cmd:'ws_select_4',        title:'Выбрать сотрудника 5' },
+        { cmd:'history_week',  title:'История за неделю' },
+        { cmd:'history_month', title:'История за месяц' },
+        { cmd:'history_menu',  title:'История' },
     ];
     for (const c of cmds) {
         const r = await callBitrix(domain, accessToken, 'imbot.command.register', {
@@ -1375,9 +1457,26 @@ const progressText =
         } else if (action === 'menu' || action === 'назад' || action === 'меню') {
             await sendMessage(domain, authToken, botId, DIALOG_ID, `👇 Выбери нужное действие:`, kb);
 
+        } else if (action === 'history_menu') {
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+             `📈 Выбери период для просмотра истории отметок и отработанных часов:`,
+              kbHistoryPeriod());
+
+        } else if (action === 'history_week') {
+            const days = 7;
+            const history = await getUserHistory(FROM_USER_ID, days);
+            const text = formatHistoryText(history, `последние ${days} дней`);
+            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kb);
+
+        } else if (action === 'history_month') {
+            const days = 30;
+            const history = await getUserHistory(FROM_USER_ID, days);
+            const text = formatHistoryText(history, `последние ${days} дней`);
+            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kb);
+
         } else if (action === 'report_today') {
-    if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-    const today = todaySV();
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+        const today = todaySV();
     
     // Исправленный запрос с in_office
     const { rows: present } = await pool.query(`
