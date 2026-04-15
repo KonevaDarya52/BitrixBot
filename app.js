@@ -671,6 +671,18 @@ async function mainKb(userId) {
     return (await isAdmin(userId)) ? kbMainAdmin() : kbMain();
 }
 
+function kbMorningReminder() {
+    return [
+        { TEXT:'✅ Пришёл', COMMAND:'arrived', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' }
+    ];
+}
+
+function kbEveningReminder() {
+    return [
+        { TEXT:'🚪 Ушёл', COMMAND:'left', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#e05c5c', TEXT_COLOR:'#ffffff' }
+    ];
+}
+
 // ─── Excel / Email — делегируем в reports.js ─────────────────────────────────
 
 async function buildExcelReport(period) {
@@ -739,7 +751,7 @@ async function morningReminder() {
             if (!shouldSend) continue;
 
             const message = `🌅 Доброе утро! Не забудь отметить приход на работе.`;
-            await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message);
+            await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message, kbMorningReminder());
             console.log(`📨 Напоминание отправлено ${emp.user_name}`);
         }
     } catch (err) {
@@ -772,7 +784,7 @@ async function eveningReminder() {
             if (!shouldSend) continue;
 
             const message = `🌆 Рабочий день подходит к концу. Не забудь отметить уход.`;
-            await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message);
+            await notifyUserInBotChat(domain, accessToken, botId, emp.user_id, message, kbEveningReminder());
             console.log(`📨 Напоминание об уходе → ${emp.user_name}`);
         }
     } catch (err) {
@@ -882,14 +894,14 @@ async function sendMessageWithRetry(domain, accessToken, botId, dialogId, messag
 
 // Уведомление сотруднику в его личный чат с ботом.
 // dialog_id берём из таблицы employees — он сохраняется при первом открытии чата.
-async function notifyUserInBotChat(domain, accessToken, botId, targetUserId, message) {
+async function notifyUserInBotChat(domain, accessToken, botId, targetUserId, message, keyboard = null) {
     const dialogId = await getEmployeeDialogId(targetUserId);
     if (!dialogId) {
         console.warn(`⚠️ notifyUser: нет dialog_id для user ${targetUserId} — сотрудник ещё не открывал чат с ботом`);
         return null;
     }
     console.log(`📣 notifyUser → userId=${targetUserId}, dialog=${dialogId}`);
-    return sendMessageWithRetry(domain, accessToken, botId, dialogId, message, null);
+    return sendMessageWithRetry(domain, accessToken, botId, dialogId, message, keyboard);
 }
 
 // ─── Регистрация команд ───────────────────────────────────────────────────────
