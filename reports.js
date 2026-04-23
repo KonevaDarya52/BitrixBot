@@ -122,14 +122,12 @@ async function loadWorkSchedulesMap(pool) {
         WHERE date_end IS NULL OR date_end >= CURRENT_DATE
     `);
     const map = new Map();
-    const today = todaySV();
     for (const ws of rows) {
-        if (!ws.date_end || ws.date_end >= today) {
-            map.set(ws.user_id, {
-                scheduleType: ws.schedule_type,
-                cycleStart: ws.cycle_start
-            });
-        }
+        map.set(String(ws.user_id), {          
+            scheduleType: ws.schedule_type,
+            cycleStart: ws.cycle_start,
+            label: WORK_SCHEDULE_TYPES[ws.schedule_type]?.label || ws.schedule_type
+        });
     }
     return map;
 }
@@ -170,7 +168,7 @@ async function buildTodaySheet(workbook, pool) {
     const isVacationOrSickIds = new Set();
     
     for (const emp of allEmps) {
-        const ws = workSchedulesMap.get(emp.user_id);
+        const ws = workSchedulesMap.get(String(emp.user_id));
         const isWorkDay = isWorkDayBySchedule(ws?.scheduleType, ws?.cycleStart, today);
         isWorkDayMap.set(emp.user_id, isWorkDay);
         
@@ -441,7 +439,7 @@ async function buildWeekSheet(workbook, pool) {
         const uid = emp.user_id;
         const daysData = empMap[uid]?.days || {};
         const sched = schedMap[uid] || {};
-        const ws = workSchedulesMap.get(uid);
+        const ws = workSchedulesMap.get(String(uid));  
 
         let daysPresent = 0, lateCount = 0;
         let totalWorkSec = 0, arrivalSecSum = 0, arrivalCount = 0;
@@ -501,7 +499,7 @@ async function buildWeekSheet(workbook, pool) {
             ? `${String(Math.floor(avgArr / 3600)).padStart(2, '0')}:${String(Math.floor((avgArr % 3600) / 60)).padStart(2, '0')}`
             : '—';
         const avgWorkSec = daysPresent > 0 ? totalWorkSec / daysPresent : 0;
-        const wsLabel = ws?.scheduleType || '—';
+        const wsLabel = ws?.label || ws?.scheduleType || '—';
         
         let grade;
         if (workDaysCount === 0) {
@@ -740,7 +738,7 @@ async function buildMonthSheet(workbook, pool) {
         const avgArr = arrCount > 0 ? arrSecSum / arrCount : null;
         const fmtT = (sec) => sec !== null ? `${String(Math.floor(sec / 3600)).padStart(2, '0')}:${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}` : '—';
         const totalHours = (totalWorkSec / 3600).toFixed(1);
-        const wsLabel = ws?.scheduleType || '—';
+        const wsLabel = ws?.label || ws?.scheduleType || '—';
 
         let grade;
         if (pct === null) {
