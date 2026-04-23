@@ -1849,6 +1849,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
             await sendMessage(domain, authToken, botId, dialogId, `❌ Сотрудник "${val}" не найден. Попробуй другое имя:`, kbCancel());
             return;
         }
+        
         if (users.length === 1) {
             await setPending(userId, 'ws_assign', 'pick_type', { ...data, userId: users[0].id, userName: users[0].name });
             await sendMessage(domain, authToken, botId, dialogId,
