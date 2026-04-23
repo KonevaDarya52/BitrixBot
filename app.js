@@ -299,6 +299,107 @@ async function getWorkScheduleStatus(userId, date) {
     };
 }
 
+async function getWorkDaysInPeriod(userId, startDate, endDate) {
+    const ws = await getEmpWorkSchedule(userId);
+    const scheduleType = ws?.schedule_type || null; // null = нет графика
+    const cycleStart = ws?.cycle_start || startDate;
+    
+    const start = new Date(startDate);
+    const end = new Date(endDate);
+    const dates = [];
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        dates.push(d.toLocaleDateString('sv-SE'));
+    }
+    
+    let totalWorkDays = 0;
+    let attendedDays = 0;
+    let vacationDays = 0, sickDays = 0, dayoffDays = 0, remoteDays = 0, businessDays = 0;
+    let lateDays = 0;
+    
+    // Получаем расписание (отпуска, больничные) за период
+    const { rows: schedRows } = await pool.query(`
+        SELECT status, date_from, date_to FROM schedules
+        WHERE user_id = $1
+          AND date_from <= $2 AND date_to >= $3
+    `, [userId, endDate, startDate]);
+    
+    // Карта расписаний
+    const schedMap = new Map();
+    for (const s of schedRows) {
+        let d = new Date(s.date_from);
+        while (d <= new Date(s.date_to)) {
+            schedMap.set(d.toLocaleDateString('sv-SE'), s.status);
+            d.setDate(d.getDate() + 1);
+        }
+    }
+    
+    // Получаем отметки
+    const { rows: marks } = await pool.query(`
+        SELECT type, timestamp, in_office
+        FROM attendance
+        WHERE user_id = $1
+          AND timestamp >= $2 AND timestamp <= $3
+        ORDER BY timestamp
+    `, [userId, startDate, endDate]);
+    
+    // Группируем отметки по дням
+    const dayMarks = new Map();
+    for (const m of marks) {
+        const dateStr = new Date(m.timestamp).toLocaleDateString('sv-SE', { timeZone: 'Asia/Yekaterinburg' });
+        if (!dayMarks.has(dateStr)) dayMarks.set(dateStr, { inTime: null, outTime: null, inOffice: 0 });
+        const entry = dayMarks.get(dateStr);
+        if (m.type === 'in') {
+            entry.inTime = m.timestamp;
+            entry.inOffice = m.in_office;
+        } else if (m.type === 'out') {
+            entry.outTime = m.timestamp;
+        }
+    }
+    
+    for (const date of dates) {
+        // Проверяем, является ли день рабочим по графику
+        let isWorkDay = true;
+        
+        if (scheduleType === '5/2') {
+            // Для графика 5/2 суббота и воскресенье — выходные
+            isWorkDay = !isRestDayBySchedule(scheduleType, cycleStart, date);
+        }
+        // Для графиков 4/2, 2/2 или отсутствия графика — все дни считаем рабочими
+        
+        if (!isWorkDay) continue;
+        
+        totalWorkDays++;
+        
+        const schedStatus = schedMap.get(date);
+        if (schedStatus === 'vacation') { vacationDays++; continue; }
+        if (schedStatus === 'sick') { sickDays++; continue; }
+        if (schedStatus === 'dayoff') { dayoffDays++; continue; }
+        if (schedStatus === 'remote') { remoteDays++; continue; }
+        if (schedStatus === 'business') { businessDays++; continue; }
+        
+        const mark = dayMarks.get(date);
+        if (mark?.inTime) {
+            attendedDays++;
+            const inHour = new Date(mark.inTime).getHours();
+            const inMin = new Date(mark.inTime).getMinutes();
+            // Опоздание: после 9:10
+            if (inHour > 9 || (inHour === 9 && inMin > 10)) lateDays++;
+        }
+    }
+    
+    return {
+        totalWorkDays,
+        attendedDays,
+        vacationDays,
+        sickDays,
+        dayoffDays,
+        remoteDays,
+        businessDays,
+        lateDays,
+        attendanceRate: totalWorkDays > 0 ? Math.round(attendedDays / totalWorkDays * 100) : 0
+    };
+}
+
 /** Пакетная проверка: Map userId → { isRest, scheduleType } */
 async function getBatchWorkScheduleStatus(userIds, date) {
     if (!userIds.length) return new Map();
@@ -969,7 +1070,62 @@ async function sendMessageWithRetry(domain, accessToken, botId, dialogId, messag
     return null;
 }
 
+async function checkAllTokens() {
+    const { rows: portals } = await pool.query(`SELECT domain, access_token, refresh_token, updated_at FROM portals`);
+    
+    for (const portal of portals) {
+        try {
+            // Проверяем токен простым запросом
+            const resp = await axios.get(`https://${portal.domain}/rest/profile`, {
+                params: { auth: portal.access_token },
+                timeout: 5000
+            });
+            
+            if (resp.data?.error === 'expired_token' && portal.refresh_token) {
+                console.log(`🔄 Обновляем токен для ${portal.domain}`);
+                const newToken = await doRefreshToken(portal.domain, portal.refresh_token);
+                if (newToken) {
+                    console.log(`✅ Токен обновлён для ${portal.domain}`);
+                } else {
+                    console.error(`❌ Не удалось обновить токен для ${portal.domain}`);
+                }
+            } else if (resp.data?.result) {
+                console.log(`✅ Токен валиден для ${portal.domain}`);
+            }
+        } catch (err) {
+            console.error(`❌ Ошибка проверки токена ${portal.domain}:`, err.message);
+        }
+    }
+}
 
+async function selfHealing() {
+    try {
+        // Проверяем, жив ли бот (отвечает ли /health)
+        const response = await axios.get(`http://localhost:${port}/health`, { timeout: 5000 });
+        if (response.data?.ok !== true) {
+            console.error('⚠️ Бот не отвечает на /health');
+            await notifyAdmin('⚠️ Бот не отвечает на health check, требуется перезагрузка');
+            process.exit(1); // Render перезапустит
+        }
+        
+        // Проверяем подключение к БД
+        await pool.query('SELECT 1');
+        
+        // Проверяем токены
+        await checkAllTokens();
+        
+        console.log('✅ Self-healing check passed');
+    } catch (err) {
+        console.error('❌ Self-healing check failed:', err.message);
+        await notifyAdmin(`❌ Self-healing ошибка: ${err.message}`);
+        process.exit(1);
+    }
+}
+
+cron.schedule('*/30 * * * *', async () => {
+    console.log('🔄 Health check и auto-recovery');
+    await selfHealing();
+});
 
 // Уведомление сотруднику в его личный чат с ботом.
 // dialog_id берём из таблицы employees — он сохраняется при первом открытии чата.
@@ -1069,6 +1225,105 @@ async function registerBot(domain, accessToken, existingBotId) {
     }
     return botId;
 }
+
+async function notifyAdmin(message, isError = true) {
+    const { domain, accessToken, botId } = await getActivePortal();
+    const adminId = MANAGER_ID;
+    
+    const dialogId = await getEmployeeDialogId(adminId);
+    if (!dialogId) {
+        console.warn('⚠️ Нет dialog_id для админа');
+        return;
+    }
+    
+    const icon = isError ? '🔴 ОШИБКА' : '⚠️ ВНИМАНИЕ';
+    const fullMessage = `${icon}\n\n${message}\n\n📅 ${new Date().toLocaleString('ru-RU')}`;
+    
+    await sendMessage(domain, accessToken, botId, dialogId, fullMessage, null);
+}
+
+async function reportLateArrivals() {
+    const today = todaySV();
+    
+    const { rows: lateArrivals } = await pool.query(`
+        SELECT user_name, MIN(timestamp) as first_in
+        FROM attendance
+        WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1
+          AND type = 'in'
+          AND EXTRACT(HOUR FROM timestamp AT TIME ZONE 'Asia/Yekaterinburg') > 9
+        GROUP BY user_name
+        ORDER BY first_in
+    `, [today]);
+    
+    if (lateArrivals.length === 0) return;
+    
+    let message = `⏰ ОПОЗДАНИЯ ЗА СЕГОДНЯ (${lateArrivals.length} чел.)\n\n`;
+    for (const l of lateArrivals) {
+        message += `• ${l.user_name} — в ${tzTime(l.first_in)}\n`;
+    }
+    
+    await notifyAdmin(message, false);
+}
+
+async function reportNotMarked() {
+    const today = todaySV();
+    
+    const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees`);
+    const { rows: marked } = await pool.query(`
+        SELECT DISTINCT user_id FROM attendance
+        WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1
+    `, [today]);
+    
+    const markedIds = new Set(marked.map(m => m.user_id));
+    const notMarked = allEmps.filter(e => !markedIds.has(e.user_id));
+    
+    if (notMarked.length === 0) return;
+    
+    let message = `❌ НЕ ОТМЕТИЛИСЬ УТРОМ (${notMarked.length} чел.)\n\n`;
+    notMarked.forEach(e => { message += `• ${e.user_name}\n`; });
+    message += `\nПожалуйста, напомните сотрудникам отметить приход.`;
+    
+    await notifyAdmin(message, false);
+}
+
+async function reportNotClosed() {
+    const today = todaySV();
+    
+    const { rows: notClosed } = await pool.query(`
+        SELECT user_name, MIN(timestamp) as first_in
+        FROM attendance
+        WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1
+          AND type = 'in'
+        GROUP BY user_name
+        HAVING MAX(CASE WHEN type='out' THEN 1 ELSE 0 END) = 0
+        ORDER BY first_in
+    `, [today]);
+    
+    if (notClosed.length === 0) return;
+    
+    let message = `🚪 НЕ ЗАКРЫЛИ СМЕНУ (${notClosed.length} чел.)\n\n`;
+    for (const n of notClosed) {
+        message += `• ${n.user_name} (пришёл в ${tzTime(n.first_in)})\n`;
+    }
+    message += `\nРекомендуется напомнить сотрудникам отметить уход.`;
+    
+    await notifyAdmin(message, false);
+}
+
+// Отчёт об опозданиях в 10:30 Ект = 5:30 UTC
+cron.schedule('30 5 * *', async () => {
+    await reportLateArrivals();
+});
+
+// Отчёт о неотметившихся в 12:00 Ект = 7:00 UTC
+cron.schedule('0 7 * *', async () => {
+    await reportNotMarked();
+});
+
+// Отчёт о незакрытых сменах в 20:30 Ект = 15:30 UTC
+cron.schedule('30 15 * *', async () => {
+    await reportNotClosed();
+});
 
 // ═════════════════════════════════════════════════════════════════════════════
 //  МАРШРУТЫ
@@ -1475,79 +1730,207 @@ const progressText =
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kb);
 
         } else if (action === 'report_today') {
-            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-        const today = todaySV();
+    if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+    const today = todaySV();
     
-    // Исправленный запрос с in_office
-    const { rows: present } = await pool.query(`
-        SELECT 
-            user_name, 
-            user_id,
-            MIN(CASE WHEN type='in' THEN timestamp END) as in_time,
-            MAX(CASE WHEN type='out' THEN timestamp END) as out_time,
-            (SELECT in_office FROM attendance a2 
-             WHERE a2.user_id = attendance.user_id 
-               AND a2.type = 'in'
-               AND (a2.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1::date
-             ORDER BY a2.timestamp DESC LIMIT 1) as in_office
-        FROM attendance
-        WHERE (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $1::date
-        GROUP BY user_id, user_name
-        ORDER BY user_name
-    `, [today]);
-    
+    // Получаем всех сотрудников
     const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
-    const schedToday = await getSchedulesToday();
-    const schedIds = new Set(schedToday.map(r => r.user_id));
-    const presentIds = new Set(present.map(r => r.user_id));
-    const absent = allEmps.filter(e => !presentIds.has(e.user_id) && !schedIds.has(e.user_id));
     
-    let text = `📋 Отчёт за ${new Date().toLocaleDateString('ru-RU')}\n\n`;
+    let presentList = [];
+    let absentList = [];
+    let vacationList = [];
+    let sickList = [];
+    let dayoffList = [];
+    let remoteList = [];
     
-    if (present.length) {
-        text += `✅ Явились (${present.length} чел.):\n`;
-        present.forEach(r => {
-            const locationLabel = (r.in_office === 0) ? '🏠 удалённо' : '🏢 в офисе';
-            const statusIcon = r.out_time ? '🔵 завершил' : '🟢 работает';
-            text += `• ${r.user_name || r.user_id}: ${locationLabel} ${r.in_time ? tzTime(r.in_time) : '?'} → ${statusIcon}\n`;
+    for (const emp of allEmps) {
+        const stats = await getWorkDaysInPeriod(emp.user_id, today, today);
+        
+        if (stats.vacationDays > 0) {
+            vacationList.push(emp.user_name);
+        } else if (stats.sickDays > 0) {
+            sickList.push(emp.user_name);
+        } else if (stats.dayoffDays > 0) {
+            dayoffList.push(emp.user_name);
+        } else if (stats.remoteDays > 0) {
+            remoteList.push(emp.user_name);
+        } else if (stats.attendedDays > 0) {
+            presentList.push({ name: emp.user_name, late: stats.lateDays > 0 });
+        } else if (stats.totalWorkDays > 0) {
+            absentList.push(emp.user_name);
+        }
+    }
+    
+    let text = `📋 ОТЧЁТ ЗА ${new Date().toLocaleDateString('ru-RU')}\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    
+    if (presentList.length) {
+        text += `✅ ПРИСУТСТВУЮТ (${presentList.length} чел.)\n`;
+        presentList.forEach(p => {
+            text += `  • ${p.name}${p.late ? ' ⚠️ опоздание' : ''}\n`;
         });
-    } else { 
-        text += `Сегодня отметок нет.\n`; 
+        text += `\n`;
     }
     
-    if (schedToday.length) {
-        text += `\n📅 По расписанию:\n`;
-        schedToday.forEach(r => { text += `• ${r.user_name}: ${SCHED_LABELS[r.status] || r.status}\n`; });
+    if (remoteList.length) {
+        text += `🏠 УДАЛЁННО (${remoteList.length} чел.)\n`;
+        remoteList.forEach(r => { text += `  • ${r}\n`; });
+        text += `\n`;
     }
     
-    if (absent.length) {
-        text += `\n❌ Не отметились (${absent.length} чел.):\n`;
-        absent.forEach(r => { text += `• ${r.user_name}\n`; });
+    if (vacationList.length) {
+        text += `🏖 В ОТПУСКЕ (${vacationList.length} чел.)\n`;
+        vacationList.forEach(v => { text += `  • ${v}\n`; });
+        text += `\n`;
     }
+    
+    if (sickList.length) {
+        text += `🤒 БОЛЬНИЧНЫЙ (${sickList.length} чел.)\n`;
+        sickList.forEach(s => { text += `  • ${s}\n`; });
+        text += `\n`;
+    }
+    
+    if (dayoffList.length) {
+        text += `📅 ВЫХОДНОЙ (${dayoffList.length} чел.)\n`;
+        dayoffList.forEach(d => { text += `  • ${d}\n`; });
+        text += `\n`;
+    }
+    
+    if (absentList.length) {
+        text += `❌ НЕ ОТМЕТИЛИСЬ (${absentList.length} чел.)\n`;
+        absentList.forEach(a => { text += `  • ${a}\n`; });
+        text += `\n`;
+    }
+    
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `📊 ВСЕГО: ${allEmps.length} чел.`;
     
     await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
+
         } else if (action === 'report_week') {
-            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-            const { rows } = await pool.query(`
-                SELECT e.user_name, COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
-                FROM employees e LEFT JOIN attendance a ON a.user_id=e.user_id AND a.type='in' AND a.timestamp>=NOW()-INTERVAL '7 days'
-                GROUP BY e.user_id, e.user_name ORDER BY days DESC, e.user_name`);
-            let text = `📅 Отчёт за 7 дней\n\n`;
-            rows.length ? rows.forEach(r => { const d=Number(r.days); text+=`${d===0?'❌':d<3?'⚠️':'✅'} ${r.user_name}: ${d} раб. дн.\n`; })
-                        : text += `Нет зарегистрированных сотрудников.`;
-            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
+    if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+    
+    const endDate = todaySV();
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 6);
+    const startDateStr = startDate.toLocaleDateString('sv-SE');
+    
+    const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
+    
+    let reportLines = [];
+    let teamTotalWorkDays = 0;
+    let teamAttendedDays = 0;
+    
+    for (const emp of allEmps) {
+        const stats = await getWorkDaysInPeriod(emp.user_id, startDateStr, endDate);
+        teamTotalWorkDays += stats.totalWorkDays;
+        teamAttendedDays += stats.attendedDays;
+        
+        let statusIcon = '';
+        if (stats.attendedDays === stats.totalWorkDays && stats.totalWorkDays > 0) statusIcon = '✅';
+        else if (stats.attendedDays === 0 && stats.totalWorkDays > 0) statusIcon = '❌';
+        else if (stats.attendedDays > 0) statusIcon = '⚠️';
+        else statusIcon = '⚪';
+        
+        reportLines.push({
+            name: emp.user_name,
+            icon: statusIcon,
+            attended: stats.attendedDays,
+            total: stats.totalWorkDays,
+            vacation: stats.vacationDays,
+            sick: stats.sickDays,
+            remote: stats.remoteDays
+        });
+    }
+    
+    reportLines.sort((a, b) => b.attended - a.attended);
+    
+    let text = `📅 ОТЧЁТ ЗА НЕДЕЛЮ (${startDate.toLocaleDateString('ru-RU')} – ${new Date().toLocaleDateString('ru-RU')})\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    
+    for (const r of reportLines) {
+        text += `${r.icon} ${r.name}\n`;
+        text += `   📊 явка: ${r.attended}/${r.total} дн. (${r.total > 0 ? Math.round(r.attended/r.total*100) : 0}%)\n`;
+        if (r.vacation > 0) text += `   🏖 отпуск: ${r.vacation} дн.\n`;
+        if (r.sick > 0) text += `   🤒 больничный: ${r.sick} дн.\n`;
+        if (r.remote > 0) text += `   🏠 удалённо: ${r.remote} дн.\n`;
+        text += `\n`;
+    }
+    
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    const teamRate = teamTotalWorkDays > 0 ? Math.round(teamAttendedDays / teamTotalWorkDays * 100) : 0;
+    text += `📊 ПО КОМАНДЕ: явка ${teamRate}% (${teamAttendedDays}/${teamTotalWorkDays} дн.)`;
+    
+    await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
+
 
         } else if (action === 'report_month') {
-            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
-            const { rows } = await pool.query(`
-                SELECT e.user_name, COUNT(DISTINCT (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date) as days
-                FROM employees e LEFT JOIN attendance a ON a.user_id=e.user_id AND a.type='in' AND a.timestamp>=NOW()-INTERVAL '30 days'
-                GROUP BY e.user_id, e.user_name ORDER BY days DESC, e.user_name`);
-            let text = `📆 Отчёт за 30 дней\n\n`;
-            rows.length ? rows.forEach(r => { const d=Number(r.days); text+=`${d===0?'❌':d<10?'⚠️':'✅'} ${r.user_name}: ${d} раб. дн.\n`; })
-                        : text += `Нет зарегистрированных сотрудников.`;
-            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
+    if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+    
+    const endDate = todaySV();
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - 29);
+    const startDateStr = startDate.toLocaleDateString('sv-SE');
+    
+    const { rows: allEmps } = await pool.query(`SELECT user_id, user_name FROM employees ORDER BY user_name`);
+    
+    let bestEmp = null;
+    let worstEmp = null;
+    let teamTotalWorkDays = 0;
+    let teamAttendedDays = 0;
+    let teamLateDays = 0;
+    
+    let reportLines = [];
+    
+    for (const emp of allEmps) {
+        const stats = await getWorkDaysInPeriod(emp.user_id, startDateStr, endDate);
+        teamTotalWorkDays += stats.totalWorkDays;
+        teamAttendedDays += stats.attendedDays;
+        teamLateDays += stats.lateDays;
+        
+        const rate = stats.totalWorkDays > 0 ? Math.round(stats.attendedDays / stats.totalWorkDays * 100) : 0;
+        
+        let grade = '';
+        if (rate >= 95) grade = '🏆 ОТЛИЧНО';
+        else if (rate >= 85) grade = '✅ ХОРОШО';
+        else if (rate >= 70) grade = '⚠️ ДОПУСТИМО';
+        else grade = '❌ КРИТИЧНО';
+        
+        reportLines.push({
+            name: emp.user_name,
+            rate,
+            attended: stats.attendedDays,
+            total: stats.totalWorkDays,
+            late: stats.lateDays,
+            grade
+        });
+        
+        if (!bestEmp || rate > bestEmp.rate) bestEmp = { name: emp.user_name, rate };
+        if (!worstEmp || rate < worstEmp.rate) worstEmp = { name: emp.user_name, rate };
+    }
+    
+    reportLines.sort((a, b) => b.rate - a.rate);
+    
+    let text = `📆 ОТЧЁТ ЗА МЕСЯЦ\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+    
+    for (const r of reportLines) {
+        text += `${r.grade} ${r.name}\n`;
+        text += `   📊 явка: ${r.attended}/${r.total} дн. (${r.rate}%)\n`;
+        if (r.late > 0) text += `   ⏰ опозданий: ${r.late}\n`;
+        text += `\n`;
+    }
+    
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    const teamRate = teamTotalWorkDays > 0 ? Math.round(teamAttendedDays / teamTotalWorkDays * 100) : 0;
+    text += `📊 ПО КОМАНДЕ:\n`;
+    text += `   • явка: ${teamRate}% (${teamAttendedDays}/${teamTotalWorkDays} дн.)\n`;
+    text += `   • опозданий: ${teamLateDays}\n`;
+    text += `   • лучший: ${bestEmp?.name || '—'} (${bestEmp?.rate || 0}%)\n`;
+    text += `   • худший: ${worstEmp?.name || '—'} (${worstEmp?.rate || 0}%)`;
+    
+    await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
 
         } else if (action === 'who_in') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
@@ -1849,7 +2232,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
             await sendMessage(domain, authToken, botId, dialogId, `❌ Сотрудник "${val}" не найден. Попробуй другое имя:`, kbCancel());
             return;
         }
-        
+
         if (users.length === 1) {
             await setPending(userId, 'ws_assign', 'pick_type', { ...data, userId: users[0].id, userName: users[0].name });
             await sendMessage(domain, authToken, botId, dialogId,

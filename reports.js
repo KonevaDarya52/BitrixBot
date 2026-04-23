@@ -88,6 +88,20 @@ function addDataRow(sheet, values, idx, rowBg = null) {
     return row;
 }
 
+// Проверка, является ли день рабочим по графику сотрудника
+async function isWorkDayForUser(pool, userId, date, scheduleType, cycleStart) {
+    if (!scheduleType || scheduleType === '5/2') {
+        const dow = new Date(date).getDay();
+        return dow !== 0 && dow !== 6;
+    }
+    const { workDays, restDays } = 
+        scheduleType === '4/2' ? { workDays: 4, restDays: 2 } : { workDays: 2, restDays: 2 };
+    const startDate = new Date(cycleStart);
+    const diffDays = Math.floor((new Date(date) - startDate) / 86400000);
+    const posInCycle = diffDays % (workDays + restDays);
+    return posInCycle < workDays;
+}
+
 // ─── Лист "Сегодня" ───────────────────────────────────────────────────────────
 async function buildTodaySheet(workbook, pool) {
     const today = todaySV();
