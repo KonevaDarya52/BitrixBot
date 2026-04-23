@@ -1311,17 +1311,17 @@ async function reportNotClosed() {
 }
 
 // Отчёт об опозданиях в 10:30 Ект = 5:30 UTC
-cron.schedule('30 5 * *', async () => {
+cron.schedule('30 5 * * *', async () => {
     await reportLateArrivals();
 });
 
 // Отчёт о неотметившихся в 12:00 Ект = 7:00 UTC
-cron.schedule('0 7 * *', async () => {
+cron.schedule('0 7 * * *', async () => {
     await reportNotMarked();
 });
 
 // Отчёт о незакрытых сменах в 20:30 Ект = 15:30 UTC
-cron.schedule('30 15 * *', async () => {
+cron.schedule('30 15 * * *', async () => {
     await reportNotClosed();
 });
 
