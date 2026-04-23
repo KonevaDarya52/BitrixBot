@@ -21,6 +21,7 @@ const C = {
     redBg:      'FFFCE8E8',
     yellowBg:   'FFFFF8E1',
     schedBg:    'FFFFF3E0',
+    dayOffBg:   'FFF0F0F0',
     schedHeader:'FFE07B29',
     border:     'FFCFD8EA',
 };
@@ -104,7 +105,10 @@ function isWorkDayBySchedule(scheduleType, cycleStart, date) {
     }
     const workDays = WORK_SCHEDULE_TYPES[scheduleType].workDays;
     const startDate = new Date(cycleStart);
-    const diffDays = Math.floor((new Date(date) - startDate) / 86400000);
+    startDate.setHours(0, 0, 0, 0);
+    const checkDate = new Date(date);
+    checkDate.setHours(0, 0, 0, 0);
+    const diffDays = Math.floor((checkDate - startDate) / 86400000);
     const cycleLen = workDays + WORK_SCHEDULE_TYPES[scheduleType].restDays;
     const posInCycle = ((diffDays % cycleLen) + cycleLen) % cycleLen;
     return posInCycle < workDays;
@@ -115,6 +119,7 @@ async function loadWorkSchedulesMap(pool) {
     const { rows } = await pool.query(`
         SELECT user_id, schedule_type, cycle_start, date_end
         FROM employee_work_schedules
+        WHERE date_end IS NULL OR date_end >= CURRENT_DATE
     `);
     const map = new Map();
     const today = todaySV();
@@ -158,21 +163,32 @@ async function buildTodaySheet(workbook, pool) {
     const schedToday = await getSchedulesToday(pool, today);
     const schedIds = new Set(schedToday.map(r => r.user_id));
     const presentIds = new Set(present.map(r => r.user_id));
-    const absent = allEmps.filter(e => !presentIds.has(e.user_id) && !schedIds.has(e.user_id));
     
     // Загружаем графики
     const workSchedulesMap = await loadWorkSchedulesMap(pool);
     const isWorkDayMap = new Map();
+    const isVacationOrSickIds = new Set();
+    
     for (const emp of allEmps) {
         const ws = workSchedulesMap.get(emp.user_id);
         const isWorkDay = isWorkDayBySchedule(ws?.scheduleType, ws?.cycleStart, today);
         isWorkDayMap.set(emp.user_id, isWorkDay);
+        
+        // Проверяем, не в отпуске/больничном ли сотрудник
+        if (schedIds.has(emp.user_id)) {
+            const schedInfo = schedToday.find(s => s.user_id === emp.user_id);
+            if (schedInfo && ['vacation', 'sick', 'dayoff'].includes(schedInfo.status)) {
+                isVacationOrSickIds.add(emp.user_id);
+            }
+        }
     }
+    
+    const absent = allEmps.filter(e => !presentIds.has(e.user_id) && !schedIds.has(e.user_id));
 
     const sheet = workbook.addWorksheet('Сегодня', { properties: { tabColor: { argb: 'FF29B36B' } } });
     sheet.views = [{ state: 'frozen', ySplit: 3 }];
 
-    sheet.mergeCells('A1:F1');
+    sheet.mergeCells('A1:H1');
     const title = sheet.getCell('A1');
     title.value = `📋 Отчёт посещаемости — ${dateRu}`;
     styleCell(title, { bold: true, bg: C.titleBg, color: C.titleText, align: 'center', size: 14 });
@@ -183,9 +199,10 @@ async function buildTodaySheet(workbook, pool) {
         `✅ Явились: ${present.length}`,
         `🟢 В офисе: ${present.filter(r => !r.out_time).length}`,
         `📅 По расписанию: ${schedToday.length}`,
-        `❌ Отсутствуют: ${absent.length}`,
+        `❌ Отсутствуют: ${absent.filter(e => isWorkDayMap.get(e.user_id)).length}`,
+        `🚫 Выходной: ${absent.filter(e => !isWorkDayMap.get(e.user_id) && !isVacationOrSickIds.has(e.user_id)).length}`,
         `👥 Всего: ${allEmps.length}`,
-        '',
+        '', ''
     ]);
     summary.height = 22;
     summary.eachCell(cell => styleCell(cell, { bg: 'FFF0F4FF', bold: true, align: 'center' }));
@@ -193,6 +210,7 @@ async function buildTodaySheet(workbook, pool) {
 
     const cols = [
         { title: 'Сотрудник', key: 'name', width: 28 },
+        { title: 'График', key: 'sched', width: 14 },
         { title: 'Приход', key: 'in', width: 12 },
         { title: 'Уход', key: 'out', width: 12 },
         { title: 'Отработано', key: 'duration', width: 24 },
@@ -210,15 +228,33 @@ async function buildTodaySheet(workbook, pool) {
         const late = inHour && parseInt(inHour) >= WORK_START_HOUR + 1;
         const status = r.out_time ? '✅ Ушёл' : '🟢 В офисе';
         const issue = late ? '⚠️ Опоздание' : '';
+        const ws = workSchedulesMap.get(r.user_id);
+        const schedLabel = ws?.scheduleType || '—';
         const bg = late ? C.yellowBg : (idx % 2 === 0 ? C.rowEven : C.rowOdd);
-        const row = sheet.addRow([r.user_name, r.in_time ? tzTime(r.in_time) : '—', r.out_time ? tzTime(r.out_time) : '—', r.duration, status, issue]);
+        const row = sheet.addRow([
+            r.user_name,
+            schedLabel,
+            r.in_time ? tzTime(r.in_time) : '—',
+            r.out_time ? tzTime(r.out_time) : '—',
+            r.duration,
+            status,
+            issue
+        ]);
         row.height = 20;
         row.eachCell((cell, ci) => styleCell(cell, { bg, align: ci === 1 ? 'left' : 'center' }));
         idx++;
     }
 
     for (const r of schedToday) {
-        const row = sheet.addRow([r.user_name, '—', '—', '—', SCHED_LABELS[r.status] || r.status, '']);
+        const ws = workSchedulesMap.get(r.user_id);
+        const schedLabel = ws?.scheduleType || '—';
+        const row = sheet.addRow([
+            r.user_name,
+            schedLabel,
+            '—', '—', '—',
+            SCHED_LABELS[r.status] || r.status,
+            ''
+        ]);
         row.height = 20;
         row.eachCell((cell, ci) => styleCell(cell, { bg: C.schedBg, align: ci === 1 ? 'left' : 'center' }));
         idx++;
@@ -226,10 +262,34 @@ async function buildTodaySheet(workbook, pool) {
 
     for (const r of absent) {
         const isWorkDay = isWorkDayMap.get(r.user_id);
-        const reason = isWorkDay ? '❌ Не отметился' : '📅 Выходной';
-        const row = sheet.addRow([r.user_name, '—', '—', '—', reason, isWorkDay ? '⚠️ Отсутствие' : '']);
+        const isOnSchedule = isVacationOrSickIds.has(r.user_id);
+        const ws = workSchedulesMap.get(r.user_id);
+        const schedLabel = ws?.scheduleType || '—';
+        
+        let status, issue, bg;
+        if (isWorkDay) {
+            status = '❌ Не отметился';
+            issue = '⚠️ Отсутствие';
+            bg = C.redBg;
+        } else if (isOnSchedule) {
+            status = '📅 По расписанию';
+            issue = '';
+            bg = C.schedBg;
+        } else {
+            status = '🚫 Выходной';
+            issue = '';
+            bg = C.dayOffBg;
+        }
+        
+        const row = sheet.addRow([
+            r.user_name,
+            schedLabel,
+            '—', '—', '—',
+            status,
+            issue
+        ]);
         row.height = 20;
-        row.eachCell((cell, ci) => styleCell(cell, { bg: C.redBg, align: ci === 1 ? 'left' : 'center' }));
+        row.eachCell((cell, ci) => styleCell(cell, { bg, align: ci === 1 ? 'left' : 'center' }));
         idx++;
     }
 
@@ -258,6 +318,7 @@ function dateRange(days) {
 // ─── Лист "Неделя" с учётом графиков ─────────────────────────────────────────
 async function buildWeekSheet(workbook, pool) {
     const WORK_START_HOUR = 9;
+    const WORK_START_MINUTE = 10;
     const days = 7;
     const interval = '7 days';
 
@@ -272,7 +333,7 @@ async function buildWeekSheet(workbook, pool) {
             MAX(CASE WHEN a.type='out' THEN (a.timestamp AT TIME ZONE 'Asia/Yekaterinburg') END) AS out_time
         FROM employees e
         LEFT JOIN attendance a ON a.user_id = e.user_id
-            AND a.timestamp >= NOW() - INTERVAL '${interval}'
+            AND a.timestamp >= NOW() - INTERVAL '7 days'
         GROUP BY e.user_id, e.user_name, day
         ORDER BY e.user_name, day
     `);
@@ -285,6 +346,7 @@ async function buildWeekSheet(workbook, pool) {
         WHERE date_from <= NOW() AND date_to >= NOW() - INTERVAL '${interval}'
     `);
 
+    // Построение карт данных
     const empMap = {};
     for (const e of allEmps) empMap[e.user_id] = { user_name: e.user_name, days: {} };
     for (const r of rawData) {
@@ -297,7 +359,8 @@ async function buildWeekSheet(workbook, pool) {
     for (const s of schedRows) {
         if (!schedMap[s.user_id]) schedMap[s.user_id] = {};
         let d = new Date(s.date_from);
-        while (d <= new Date(s.date_to)) {
+        const endDate = new Date(s.date_to);
+        while (d <= endDate) {
             schedMap[s.user_id][d.toLocaleDateString('sv-SE')] = s.status;
             d.setDate(d.getDate() + 1);
         }
@@ -310,7 +373,7 @@ async function buildWeekSheet(workbook, pool) {
         return `${dayNames[dt.getDay()]} ${dt.getDate()} ${monthNames[dt.getMonth()]}`;
     });
 
-    const totalCols = 1 + allDates.length + 7;
+    const totalCols = 1 + allDates.length + 8; // +8 для статистики с графиком
     const colLetters = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R'];
     const sheetLabel = `Неделя (7 дн.)`;
     const sheet = workbook.addWorksheet(sheetLabel, { properties: { tabColor: { argb: 'FF5B8DEF' } } });
@@ -326,6 +389,7 @@ async function buildWeekSheet(workbook, pool) {
     sheet.getRow(1).height = 32;
     sheet.addRow([]);
 
+    // Строка 3 - группировка колонок
     const r3 = sheet.getRow(3);
     r3.height = 20;
     sheet.mergeCells(`A3:A4`);
@@ -343,6 +407,7 @@ async function buildWeekSheet(workbook, pool) {
     styleCell(sheet.getCell(`${statStart}3`), { bold: true, color: C.headerText, bg: 'FF3A7BD5', align: 'center', size: 11 });
     sheet.getCell(`${statStart}3`).value = '📊 Итоговая статистика';
 
+    // Строка 4 - подзаголовки
     const r4 = sheet.getRow(4);
     r4.height = 22;
     allDates.forEach((d, i) => {
@@ -350,16 +415,17 @@ async function buildWeekSheet(workbook, pool) {
         cell.value = dateLabels[i];
         styleCell(cell, { bold: true, color: C.headerText, bg: 'FF5B8DEF', align: 'center', size: 10 });
     });
-    const statHeaders = ['Явок', 'Из дн.', '% явки', 'Опозданий', 'Ср. приход', 'Ср. часов/день', 'Оценка'];
+    const statHeaders = ['Явок', 'Из дн.', '% явки', 'Опозданий', 'Ср. приход', 'Ср. часов/день', 'График', 'Оценка'];
     statHeaders.forEach((h, i) => {
         const cell = r4.getCell(2 + allDates.length + i);
         cell.value = h;
         styleCell(cell, { bold: true, color: C.headerText, bg: 'FF3A7BD5', align: 'center', size: 10 });
     });
 
+    // Установка ширины колонок
     sheet.getColumn(1).width = 28;
     allDates.forEach((_, i) => { sheet.getColumn(2 + i).width = 16; });
-    [10, 10, 10, 13, 14, 16, 18].forEach((w, i) => {
+    [10, 10, 10, 13, 14, 16, 10, 18].forEach((w, i) => {
         sheet.getColumn(2 + allDates.length + i).width = w;
     });
 
@@ -369,6 +435,7 @@ async function buildWeekSheet(workbook, pool) {
     };
 
     let teamTotalWorkDays = 0, teamPresent = 0, teamLate = 0, teamArrSec = 0, teamArrCount = 0;
+    let rowIdx = 0;
 
     for (const emp of allEmps) {
         const uid = emp.user_id;
@@ -386,17 +453,20 @@ async function buildWeekSheet(workbook, pool) {
             const isWorkDay = isWorkDayBySchedule(ws?.scheduleType, ws?.cycleStart, d);
             const schedStatus = sched[d];
 
+            // Обработка особых статусов (отпуск, больничный и т.д.)
             if (schedStatus) {
                 rowValues.push(SCHED_DISPLAY[schedStatus] || schedStatus);
                 if (isWorkDay) workDaysCount++;
                 continue;
             }
 
+            // Если день нерабочий по графику
             if (!isWorkDay) {
                 rowValues.push('🚫 Вых.');
                 continue;
             }
 
+            // Рабочий день, проверяем отметки
             workDaysCount++;
             const rec = daysData[d];
             if (rec?.in) {
@@ -404,7 +474,7 @@ async function buildWeekSheet(workbook, pool) {
                 const inHour = inDt.getHours();
                 const inMin = inDt.getMinutes();
                 const timeStr = `${String(inHour).padStart(2, '0')}:${String(inMin).padStart(2, '0')}`;
-                const isLate = inHour > WORK_START_HOUR || (inHour === WORK_START_HOUR && inMin > 10);
+                const isLate = inHour > WORK_START_HOUR || (inHour === WORK_START_HOUR && inMin > WORK_START_MINUTE);
 
                 rowValues.push(isLate ? `⚠️ ${timeStr}` : `✅ ${timeStr}`);
                 daysPresent++;
@@ -424,17 +494,46 @@ async function buildWeekSheet(workbook, pool) {
             }
         }
 
+        // Расчет статистики
         const pct = workDaysCount > 0 ? Math.round((daysPresent / workDaysCount) * 100) : 0;
         const avgArr = arrivalCount > 0 ? arrivalSecSum / arrivalCount : null;
         const avgArrStr = avgArr !== null
             ? `${String(Math.floor(avgArr / 3600)).padStart(2, '0')}:${String(Math.floor((avgArr % 3600) / 60)).padStart(2, '0')}`
             : '—';
         const avgWorkSec = daysPresent > 0 ? totalWorkSec / daysPresent : 0;
-        const grade = pct >= 90 ? '✅ Отлично' : pct >= 70 ? '⚠️ Допустимо' : lateCount >= 3 ? '⚠️ Опоздания' : '❌ Нарушения';
+        const wsLabel = ws?.scheduleType || '—';
+        
+        let grade;
+        if (workDaysCount === 0) {
+            grade = '⚪ Нет раб. дней';
+        } else if (pct >= 90 && lateCount === 0) {
+            grade = '✅ Отлично';
+        } else if (pct >= 90) {
+            grade = '✅ Хорошо';
+        } else if (pct >= 70) {
+            grade = '⚠️ Допустимо';
+        } else if (lateCount >= 3) {
+            grade = '⚠️ Опоздания';
+        } else {
+            grade = '❌ Нарушения';
+        }
 
-        rowValues.push(daysPresent, workDaysCount, `${pct}%`, lateCount, avgArrStr, fmtSec(avgWorkSec), grade);
+        rowValues.push(daysPresent, workDaysCount, `${pct}%`, lateCount, avgArrStr, fmtSec(avgWorkSec), wsLabel, grade);
 
-        const bg = pct >= 90 ? C.greenBg : pct >= 70 ? C.rowEven : lateCount >= 3 ? C.yellowBg : C.redBg;
+        // Выбор цвета строки
+        let bg;
+        if (workDaysCount === 0) {
+            bg = C.dayOffBg;
+        } else if (pct >= 90 && lateCount === 0) {
+            bg = C.greenBg;
+        } else if (pct >= 90) {
+            bg = C.rowEven;
+        } else if (pct >= 70) {
+            bg = C.yellowBg;
+        } else {
+            bg = C.redBg;
+        }
+
         const dataRow = sheet.addRow(rowValues);
         dataRow.height = 20;
 
@@ -446,19 +545,33 @@ async function buildWeekSheet(workbook, pool) {
                 if (val.startsWith('✅')) cellBg = C.greenBg;
                 else if (val.startsWith('⚠️')) cellBg = C.yellowBg;
                 else if (val === '❌') cellBg = C.redBg;
-                else if (val === '🚫 Вых.') cellBg = C.schedBg;
-                else if (val.includes('Отпуск') || val.includes('Больничный') || val.includes('Удалённо') || val.includes('Командировка') || val.includes('Выходной')) cellBg = C.schedBg;
+                else if (val === '🚫 Вых.') cellBg = C.dayOffBg;
+                else if (val.includes('Отпуск') || val.includes('Больничный') || 
+                         val.includes('Удалённо') || val.includes('Командировка') || 
+                         val.includes('Выходной')) cellBg = C.schedBg;
             }
             styleCell(cell, { bg: cellBg, align: ci === 1 ? 'left' : 'center', size: 10 });
         });
 
+        rowIdx++;
         teamPresent += daysPresent;
         teamLate += lateCount;
         teamTotalWorkDays += workDaysCount;
-        if (arrivalCount > 0) { teamArrSec += arrivalSecSum / arrivalCount; teamArrCount++; }
+        if (arrivalCount > 0) { 
+            teamArrSec += arrivalSecSum; 
+            teamArrCount += arrivalCount; 
+        }
     }
 
+    // Итоговая строка по команде
     sheet.addRow([]);
+    const teamAvgArrStr = teamArrCount > 0 
+        ? (() => { 
+            const s = teamArrSec / teamArrCount; 
+            return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`; 
+          })() 
+        : '—';
+    
     const teamRow = sheet.addRow([
         '📊 ИТОГО ПО КОМАНДЕ',
         ...allDates.map(() => ''),
@@ -466,8 +579,10 @@ async function buildWeekSheet(workbook, pool) {
         teamTotalWorkDays,
         teamTotalWorkDays > 0 ? `${Math.round(teamPresent / teamTotalWorkDays * 100)}%` : '—',
         teamLate,
-        teamArrCount > 0 ? (() => { const s = teamArrSec / teamArrCount; return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`; })() : '—',
-        '—', '—',
+        teamAvgArrStr,
+        '—',
+        '—',
+        '—'
     ]);
     teamRow.height = 22;
     teamRow.eachCell((cell, ci) => {
@@ -480,6 +595,7 @@ async function buildWeekSheet(workbook, pool) {
 // ─── Лист "Месяц" с учётом графиков ──────────────────────────────────────────
 async function buildMonthSheet(workbook, pool) {
     const WORK_START_HOUR = 9;
+    const WORK_START_MINUTE = 10;
     const days = 30;
     const interval = '30 days';
 
@@ -506,6 +622,7 @@ async function buildMonthSheet(workbook, pool) {
         WHERE date_from <= NOW() AND date_to >= NOW() - INTERVAL '${interval}'
     `);
 
+    // Построение карт данных
     const empMap = {};
     for (const e of allEmps) empMap[e.user_id] = { user_name: e.user_name, days: {} };
     for (const r of rawData) {
@@ -518,7 +635,8 @@ async function buildMonthSheet(workbook, pool) {
     for (const s of schedRows) {
         if (!schedMap[s.user_id]) schedMap[s.user_id] = {};
         let d = new Date(s.date_from);
-        while (d <= new Date(s.date_to)) {
+        const endDate = new Date(s.date_to);
+        while (d <= endDate) {
             schedMap[s.user_id][d.toLocaleDateString('sv-SE')] = s.status;
             d.setDate(d.getDate() + 1);
         }
@@ -527,8 +645,8 @@ async function buildMonthSheet(workbook, pool) {
     const sheet = workbook.addWorksheet(`Месяц (${days} дн.)`, { properties: { tabColor: { argb: 'FF3A7BD5' } } });
     sheet.views = [{ state: 'frozen', ySplit: 6 }];
 
-    const TOTAL_COLS = 11;
-    sheet.mergeCells(`A1:K1`);
+    const TOTAL_COLS = 12; // Увеличено на 1 для колонки "График"
+    sheet.mergeCells(`A1:L1`);
     const titleCell = sheet.getCell('A1');
     const fromLabel = new Date(allDates[0]).toLocaleDateString('ru-RU');
     const toLabel = new Date(allDates[allDates.length - 1]).toLocaleDateString('ru-RU');
@@ -537,6 +655,7 @@ async function buildMonthSheet(workbook, pool) {
     sheet.getRow(1).height = 32;
     sheet.addRow([]);
 
+    // Заголовки группировки
     sheet.mergeCells('A3:A4');
     styleCell(sheet.getCell('A3'), { bold: true, color: C.headerText, bg: C.headerBg, align: 'center', size: 11 });
     sheet.getCell('A3').value = 'Сотрудник';
@@ -549,12 +668,12 @@ async function buildMonthSheet(workbook, pool) {
     styleCell(sheet.getCell('F3'), { bold: true, color: C.headerText, bg: 'FF5B8DEF', align: 'center', size: 11 });
     sheet.getCell('F3').value = '⏱ Время работы';
 
-    sheet.mergeCells('J3:K3');
+    sheet.mergeCells('J3:L3');
     styleCell(sheet.getCell('J3'), { bold: true, color: C.headerText, bg: 'FF2D8CFF', align: 'center', size: 11 });
     sheet.getCell('J3').value = '🏆 Итог';
 
-    const subHeaders = ['', 'Явок', 'Из дн.', '% явки', 'Пропусков', 'Опозданий', 'Ср. приход', 'Ранний', 'Поздний', 'Итого часов', 'Оценка'];
-    const subBgs = ['', 'FF3A7BD5', 'FF3A7BD5', 'FF3A7BD5', 'FF3A7BD5', 'FF5B8DEF', 'FF5B8DEF', 'FF5B8DEF', 'FF5B8DEF', 'FF2D8CFF', 'FF2D8CFF'];
+    const subHeaders = ['', 'Явок', 'Из дн.', '% явки', 'Пропусков', 'Опозданий', 'Ср. приход', 'Ранний', 'Поздний', 'Итого часов', 'График', 'Оценка'];
+    const subBgs = ['', 'FF3A7BD5', 'FF3A7BD5', 'FF3A7BD5', 'FF3A7BD5', 'FF5B8DEF', 'FF5B8DEF', 'FF5B8DEF', 'FF5B8DEF', 'FF2D8CFF', 'FF2D8CFF', 'FF2D8CFF'];
     const r4 = sheet.getRow(4);
     r4.height = 22;
     subHeaders.forEach((h, i) => {
@@ -565,10 +684,9 @@ async function buildMonthSheet(workbook, pool) {
     });
 
     sheet.getColumn(1).width = 28;
-    [10, 10, 10, 12, 13, 14, 12, 12, 14, 20].forEach((w, i) => { sheet.getColumn(2 + i).width = w; });
+    [10, 10, 10, 12, 13, 14, 12, 12, 14, 10, 20].forEach((w, i) => { sheet.getColumn(2 + i).width = w; });
     sheet.addRow([]);
 
-    const SCHED_LABELS_M = { vacation: '🏖', sick: '🤒', dayoff: '📅', remote: '🏠', business: '✈️' };
     let bestEmp = null, worstEmp = null, teamTotalWorkDays = 0, teamAttendedDays = 0, teamLateDays = 0;
 
     for (const emp of allEmps) {
@@ -598,7 +716,7 @@ async function buildMonthSheet(workbook, pool) {
                 const inH = inDt.getHours();
                 const inM = inDt.getMinutes();
                 const arrSec = inH * 3600 + inM * 60;
-                const isLate = inH > WORK_START_HOUR || (inH === WORK_START_HOUR && inM > 10);
+                const isLate = inH > WORK_START_HOUR || (inH === WORK_START_HOUR && inM > WORK_START_MINUTE);
 
                 daysPresent++;
                 if (isLate) lateCount++;
@@ -622,18 +740,26 @@ async function buildMonthSheet(workbook, pool) {
         const avgArr = arrCount > 0 ? arrSecSum / arrCount : null;
         const fmtT = (sec) => sec !== null ? `${String(Math.floor(sec / 3600)).padStart(2, '0')}:${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}` : '—';
         const totalHours = (totalWorkSec / 3600).toFixed(1);
+        const wsLabel = ws?.scheduleType || '—';
 
         let grade;
         if (pct === null) {
-            const allSched = Object.values(sched);
-            grade = `${[...new Set(allSched.map(s => SCHED_LABELS_M[s] || s))].join(' ')} Весь период`;
-        } else if (pct >= 90 && lateCount === 0) grade = '✅ Отлично';
-        else if (pct >= 90) grade = '✅ Хорошо';
-        else if (pct >= 80) grade = lateCount >= 5 ? '⚠️ Опоздания' : '⚠️ Допустимо';
-        else if (pct >= 60) grade = '⚠️ Нарушения';
-        else grade = '❌ Критично';
+            grade = 'Весь период в расписании';
+        } else if (pct >= 90 && lateCount === 0) {
+            grade = '✅ Отлично';
+        } else if (pct >= 90) {
+            grade = '✅ Хорошо';
+        } else if (pct >= 80) {
+            grade = lateCount >= 5 ? '⚠️ Опоздания' : '⚠️ Допустимо';
+        } else if (pct >= 60) {
+            grade = '⚠️ Нарушения';
+        } else {
+            grade = '❌ Критично';
+        }
 
-        const bg = pct === null ? C.schedBg : pct >= 90 ? (lateCount === 0 ? C.greenBg : C.rowEven) : pct >= 70 ? C.yellowBg : C.redBg;
+        const bg = pct === null ? C.schedBg : 
+                   pct >= 90 ? (lateCount === 0 ? C.greenBg : C.rowEven) : 
+                   pct >= 70 ? C.yellowBg : C.redBg;
 
         const row = sheet.addRow([
             emp.user_name,
@@ -646,6 +772,7 @@ async function buildMonthSheet(workbook, pool) {
             fmtT(earliestSec),
             fmtT(latestSec),
             pct !== null ? `${totalHours} ч` : '—',
+            wsLabel,
             grade,
         ]);
         row.height = 20;
@@ -660,7 +787,13 @@ async function buildMonthSheet(workbook, pool) {
     sheet.addRow([]);
     const teamRate = teamTotalWorkDays > 0 ? Math.round(teamAttendedDays / teamTotalWorkDays * 100) : 0;
     const teamRow = sheet.addRow([
-        '📊 ИТОГО ПО КОМАНДЕ', '', '', `${teamRate}%`, '', teamLateDays, '', '', '', '', `${bestEmp?.name || '—'} (лучший)`,
+        '📊 ИТОГО ПО КОМАНДЕ', 
+        '', '', 
+        `${teamRate}%`, 
+        '', 
+        teamLateDays, 
+        '', '', '', '', '', 
+        `${bestEmp?.name || '—'} (лучший)`,
     ]);
     teamRow.height = 22;
     teamRow.eachCell((cell, ci) => {
