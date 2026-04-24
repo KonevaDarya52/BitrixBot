@@ -787,8 +787,46 @@ function kbSchedule() {
         { TEXT:'✈️ Командировка',   COMMAND:'sched_business', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#3a7bd5', TEXT_COLOR:'#ffffff' },
         { TEXT:'📋 Список',         COMMAND:'sched_list',     COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' },
         { TYPE:'NEWLINE' },
+        { TEXT:'👥 Массово',         COMMAND:'sched_bulk',    COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#7b4fa6', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
         { TEXT:'🗑 Удалить запись',  COMMAND:'sched_delete',  COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#c0392b', TEXT_COLOR:'#ffffff' },
         { TEXT:'◀️ Назад',           COMMAND:'admin_back',    COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#555555', TEXT_COLOR:'#ffffff' },
+    ];
+}
+
+// ─── Клавиатуры для массового создания расписания ─────────────────────────────
+function kbBulkAddMore(selectedUsers) {
+    const btns = [];
+    if ((selectedUsers || []).length < 20) {
+        btns.push({ TEXT:'➕ Добавить ещё', COMMAND:'bulk_add_more', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#29b36b', TEXT_COLOR:'#ffffff' });
+    }
+    btns.push({ TEXT:'✅ Готово — выбрать тип', COMMAND:'bulk_done_select', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#3a7bd5', TEXT_COLOR:'#ffffff' });
+    btns.push({ TYPE:'NEWLINE' });
+    btns.push({ TEXT:'❌ Отмена', COMMAND:'cancel_input', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' });
+    return btns;
+}
+
+function kbBulkConflict() {
+    return [
+        { TEXT:'✅ Перезаписать конфликты', COMMAND:'bulk_sched_overwrite', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#e07b29', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'⏭ Пропустить конфликты',   COMMAND:'bulk_sched_skip',      COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'❌ Отмена',                 COMMAND:'cancel_input',          COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
+    ];
+}
+
+function kbBulkStatus() {
+    return [
+        { TEXT:'🏖 Отпуск',       COMMAND:'bulk_status_vacation', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#f4a724', TEXT_COLOR:'#ffffff' },
+        { TEXT:'🤒 Больничный',   COMMAND:'bulk_status_sick',     COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#e05c5c', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'📅 Выходной',     COMMAND:'bulk_status_dayoff',   COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
+        { TEXT:'🏠 Удалённо',     COMMAND:'bulk_status_remote',   COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#5b8def', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'✈️ Командировка', COMMAND:'bulk_status_business', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#3a7bd5', TEXT_COLOR:'#ffffff' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'❌ Отмена',       COMMAND:'cancel_input',          COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
     ];
 }
 
@@ -2224,6 +2262,121 @@ const progressText =
                 `\n✅ Назначено: ${created.length} чел.\n${created.map(n => `  • ${n}`).join('\n')}` +
                 (skipped.length ? `\n\n⏭ Пропущено: ${skipped.length} чел.\n${skipped.map(n => `  • ${n}`).join('\n')}` : ''),
                 kbWorkSched());
+
+        } else if (action === 'sched_bulk') {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            await setPending(FROM_USER_ID, 'bulk_schedule', 'search_users', { adminSession: true, selectedUsers: [] });
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `👥 Массовое создание расписания\n\n` +
+                `🔍 Шаг 1: Поиск сотрудников\n\n` +
+                `Введи имя или фамилию сотрудника.\n` +
+                `После каждого выбора можно добавить следующего.`,
+                kbCancel());
+
+        } else if (action === 'bulk_add_more') {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const p = await getPending(FROM_USER_ID);
+            if (!p || p.action !== 'bulk_schedule') return;
+            await setPending(FROM_USER_ID, 'bulk_schedule', 'search_users', { ...p.data });
+            const names = (p.data.selectedUsers || []).map(u => `• ${u.name}`).join('\n');
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `✅ Уже выбраны (${p.data.selectedUsers.length}):\n${names}\n\n🔍 Введи имя следующего сотрудника:`,
+                kbCancel());
+
+        } else if (action === 'bulk_done_select') {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const p = await getPending(FROM_USER_ID);
+            if (!p || p.action !== 'bulk_schedule') return;
+            if (!p.data.selectedUsers?.length) {
+                await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Не выбран ни один сотрудник. Введи имя:`, kbCancel());
+                return;
+            }
+            await setPending(FROM_USER_ID, 'bulk_schedule', 'pick_status', { ...p.data });
+            const names = p.data.selectedUsers.map(u => `• ${u.name}`).join('\n');
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `👥 Выбрано сотрудников: ${p.data.selectedUsers.length}\n${names}\n\n` +
+                `📋 Шаг 2: Выбери тип расписания:`,
+                kbBulkStatus());
+
+        } else if (/^bulk_status_/.test(action)) {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const p = await getPending(FROM_USER_ID);
+            if (!p || p.action !== 'bulk_schedule' || p.step !== 'pick_status') return;
+            const statusMap2 = { bulk_status_vacation:'vacation', bulk_status_sick:'sick', bulk_status_dayoff:'dayoff', bulk_status_remote:'remote', bulk_status_business:'business' };
+            const status = statusMap2[action];
+            if (!status) { await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Неизвестный тип. Попробуй снова.`, kbBulkStatus()); return; }
+            await setPending(FROM_USER_ID, 'bulk_schedule', 'date_from', { ...p.data, status });
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `📋 Тип: ${SCHED_LABELS[status]}\n\n📅 Шаг 3: Введи дату начала (ДД.ММ.ГГГГ):`,
+                kbCancel());
+
+        } else if (/^bulk_select_user_\d$/.test(action)) {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const p = await getPending(FROM_USER_ID);
+            if (!p || p.action !== 'bulk_schedule') return;
+            const idx = parseInt(action.replace('bulk_select_user_', ''));
+            const sel = (p.data.foundUsers || [])[idx];
+            if (!sel) { await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Сотрудник не найден.`, kbCancel()); return; }
+            const already = (p.data.selectedUsers || []).find(u => String(u.id) === String(sel.id));
+            if (already) {
+                await sendMessage(domain, authToken, botId, DIALOG_ID, `ℹ️ ${sel.name} уже в списке.`, kbBulkAddMore(p.data.selectedUsers));
+                return;
+            }
+            const updatedUsers = [...(p.data.selectedUsers || []), { id: sel.id, name: sel.name }];
+            await setPending(FROM_USER_ID, 'bulk_schedule', 'adding_users', { ...p.data, selectedUsers: updatedUsers, foundUsers: [] });
+            const names = updatedUsers.map(u => `• ${u.name}`).join('\n');
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `✅ Добавлен: ${sel.name}\n\n👥 Выбрано (${updatedUsers.length}):\n${names}\n\nЧто дальше?`,
+                kbBulkAddMore(updatedUsers));
+
+        } else if (action === 'bulk_sched_overwrite') {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const p = await getPending(FROM_USER_ID);
+            if (!p || p.action !== 'bulk_schedule' || p.step !== 'confirm_conflicts') return;
+            const { selectedUsers, status, dateFrom, dateTo, comment } = p.data;
+            const userIds = selectedUsers.map(u => String(u.id));
+            const conflictMapRaw = await checkBulkConflicts(userIds, dateFrom, dateTo);
+            const { created } = await insertBulkSchedule(selectedUsers, status, dateFrom, dateTo, comment, FROM_USER_ID, conflictMapRaw, userIds);
+            await clearPending(FROM_USER_ID);
+            await setPending(FROM_USER_ID, 'admin_session', 'active');
+            const from = new Date(dateFrom).toLocaleDateString('ru-RU');
+            const to   = new Date(dateTo).toLocaleDateString('ru-RU');
+            for (const emp of selectedUsers.filter(u => created.includes(u.name))) {
+                const notifyText = `📅 Вам назначено расписание\n\n${SCHED_LABELS[status]}\n📅 ${from} — ${to}` +
+                    (comment ? `\n💬 ${comment}` : '') + `\n\nИнформация внесена администратором.`;
+                await notifyUserInBotChat(domain, authToken, botId, emp.id, notifyText);
+            }
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `✅ Расписание создано (конфликты перезаписаны)!\n\n` +
+                `📋 ${SCHED_LABELS[status]}: ${from} — ${to}\n` +
+                (comment ? `💬 ${comment}\n` : '') +
+                `\n✅ Создано: ${created.length} чел.\n${created.map(n=>`  • ${n}`).join('\n')}`,
+                kbSchedule());
+
+        } else if (action === 'bulk_sched_skip') {
+            if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+            const p = await getPending(FROM_USER_ID);
+            if (!p || p.action !== 'bulk_schedule' || p.step !== 'confirm_conflicts') return;
+            const { selectedUsers, status, dateFrom, dateTo, comment } = p.data;
+            const userIds = selectedUsers.map(u => String(u.id));
+            const conflictMapRaw = await checkBulkConflicts(userIds, dateFrom, dateTo);
+            const { created, skipped } = await insertBulkSchedule(selectedUsers, status, dateFrom, dateTo, comment, FROM_USER_ID, conflictMapRaw, []);
+            await clearPending(FROM_USER_ID);
+            await setPending(FROM_USER_ID, 'admin_session', 'active');
+            const from = new Date(dateFrom).toLocaleDateString('ru-RU');
+            const to   = new Date(dateTo).toLocaleDateString('ru-RU');
+            for (const emp of selectedUsers.filter(u => created.includes(u.name))) {
+                const notifyText = `📅 Вам назначено расписание\n\n${SCHED_LABELS[status]}\n📅 ${from} — ${to}` +
+                    (comment ? `\n💬 ${comment}` : '') + `\n\nИнформация внесена администратором.`;
+                await notifyUserInBotChat(domain, authToken, botId, emp.id, notifyText);
+            }
+            await sendMessage(domain, authToken, botId, DIALOG_ID,
+                `✅ Расписание создано (конфликты пропущены)!\n\n` +
+                `📋 ${SCHED_LABELS[status]}: ${from} — ${to}\n` +
+                (comment ? `💬 ${comment}\n` : '') +
+                `\n✅ Создано: ${created.length} чел.\n${created.map(n=>`  • ${n}`).join('\n')}` +
+                (skipped.length ? `\n\n⏭ Пропущено: ${skipped.length} чел.\n${skipped.map(n=>`  • ${n}`).join('\n')}` : ''),
+                kbSchedule());
 
         } else if (['sched_vacation','sched_sick','sched_dayoff','sched_remote','sched_business'].includes(action)) {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
