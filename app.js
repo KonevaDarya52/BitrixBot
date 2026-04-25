@@ -1655,8 +1655,16 @@ app.post('/imbot', async (req, res) => {
 
         const userIsAdmin = await isAdmin(FROM_USER_ID);
         const pending     = await getPending(FROM_USER_ID);
-        // inAdminMode — только явная сессия, без самопроизвольного переключения
-        const inAdminMode = userIsAdmin && pending?.action === 'admin_session';
+        // Admin-флоу, которые доступны только администраторам
+        const ADMIN_ACTIONS = new Set([
+            'admin_session', 'ws_bulk', 'bulk_schedule',
+            'ws_assign', 'ws_remove', 'schedule_add', 'schedule_delete',
+            'admin_add', 'admin_remove',
+        ]);
+        const inAdminMode = userIsAdmin && (
+            pending?.action === 'admin_session' ||
+            (pending?.data?.adminSession === true && ADMIN_ACTIONS.has(pending?.action))
+        );
         const kb = inAdminMode ? kbAdmin() : await mainKb(FROM_USER_ID);
 
         // Продлеваем сессию при каждом действии администратора
