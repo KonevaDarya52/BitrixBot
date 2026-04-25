@@ -1601,6 +1601,7 @@ app.post('/imbot', async (req, res) => {
     res.json({ result:'ok' });
     try {
         const body  = req.body;
+        console.log('🔍 RAW BODY:', JSON.stringify(body).slice(0, 500));
         const event = body.event || body.EVENT;
         const data  = body.data  || body.DATA  || {};
         const auth  = body.auth  || body.AUTH  || {};
