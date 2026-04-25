@@ -2137,6 +2137,7 @@ const progressText =
     await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbWorkSched());
 
         } else if (action === 'ws_bulk') {
+            console.log(`[ws_bulk] inAdminMode=${inAdminMode} userIsAdmin=${userIsAdmin} pending=${pending?.action}`);
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await setPending(FROM_USER_ID, 'ws_bulk', 'search_users', { adminSession: true, selectedUsers: [] });
             await sendMessage(domain, authToken, botId, DIALOG_ID,
@@ -2169,7 +2170,7 @@ const progressText =
             await sendMessage(domain, authToken, botId, DIALOG_ID,
                 `👥 Выбрано сотрудников: ${p.data.selectedUsers.length}\n${names}\n\n` +
                 `📊 Шаг 2: Выбери тип рабочего графика:`,
-                kbWorkSchedType());
+                kbWorkSchedTypeBulk());
 
         } else if (/^ws_bulk_type_/.test(action)) {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
@@ -2224,7 +2225,7 @@ const progressText =
             await pool.query(`DELETE FROM employee_work_schedules WHERE user_id = ANY($1)`, [overwriteIds]);
             const results = [];
             for (const emp of selectedUsers) {
-                await setEmpWorkSchedule(domain, authToken, String(emp.id), emp.name, scheduleType, cycleStart, dateEnd || null, String(FROM_USER_ID));
+                await setEmpWorkSchedule(String(emp.id), emp.name, scheduleType, cycleStart, dateEnd || null, String(FROM_USER_ID));
                 results.push(emp.name);
                 const notifyText = `📊 Вам назначен новый график работы\n\n` +
                     `${WORK_SCHEDULE_TYPES[scheduleType]?.label || scheduleType}\n` +
@@ -2253,7 +2254,7 @@ const progressText =
                     skipped.push(emp.name);
                     continue;
                 }
-                await setEmpWorkSchedule(domain, authToken, String(emp.id), emp.name, scheduleType, cycleStart, dateEnd || null, String(FROM_USER_ID));
+                await setEmpWorkSchedule(String(emp.id), emp.name, scheduleType, cycleStart, dateEnd || null, String(FROM_USER_ID));
                 created.push(emp.name);
                 const notifyText = `📊 Вам назначен новый график работы\n\n` +
                     `${WORK_SCHEDULE_TYPES[scheduleType]?.label || scheduleType}\n` +
@@ -2628,7 +2629,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
             // Конфликтов нет — сразу назначаем всем
             const created = [];
             for (const emp of selectedUsers) {
-                await setEmpWorkSchedule(domain, authToken, String(emp.id), emp.name, scheduleType, cycleStart, dateEnd, String(userId));
+                await setEmpWorkSchedule(String(emp.id), emp.name, scheduleType, cycleStart, dateEnd, String(userId));
                 created.push(emp.name);
                 const notifyText = `📊 Вам назначен новый график работы\n\n` +
                     `${WORK_SCHEDULE_TYPES[scheduleType]?.label || scheduleType}\n` +
