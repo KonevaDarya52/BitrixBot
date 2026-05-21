@@ -72,13 +72,44 @@ async function initDB() {
     await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS dialog_id TEXT`);
     // Таблица типов рабочих графиков (5/2, 4/2, 2/2)
     await pool.query(`CREATE TABLE IF NOT EXISTS employee_work_schedules (
-        user_id       TEXT PRIMARY KEY,
-        user_name     TEXT NOT NULL,
-        schedule_type TEXT NOT NULL,
-        cycle_start   DATE NOT NULL,
-        assigned_by   TEXT,
-        assigned_at   TIMESTAMPTZ DEFAULT NOW(),
-        updated_at    TIMESTAMPTZ DEFAULT NOW())`);
+ user_id TEXT PRIMARY KEY,
+ user_name TEXT NOT NULL,
+ schedule_type TEXT NOT NULL,
+ cycle_start DATE NOT NULL,
+ date_end DATE,
+ assigned_by TEXT,
+ assigned_at TIMESTAMPTZ DEFAULT NOW(),
+ updated_at TIMESTAMPTZ DEFAULT NOW()
+)`);
+// Миграции для существующих БД
+await pool.query(`ALTER TABLE employee_work_schedules ADD COLUMN IF NOT EXISTS date_end DATE`);
+await pool.query(`ALTER TABLE employee_work_schedules ADD COLUMN IF NOT EXISTS assigned_by TEXT`);
+await pool.query(`ALTER TABLE employee_work_schedules ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ DEFAULT NOW()`);
+await pool.query(`ALTER TABLE employee_work_schedules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW()`);
+
+    
+        // ─── Audit log ────────────────────────────────────────────────────────────────
+await pool.query(`
+  CREATE TABLE IF NOT EXISTS audit_log (
+    id SERIAL PRIMARY KEY,
+    ts TIMESTAMPTZ DEFAULT NOW(),
+
+    action TEXT NOT NULL,                 -- тип действия (admin_add, schedule_add, ...)
+    actor_user_id TEXT,                   -- кто сделал
+    actor_user_name TEXT,
+
+    target_user_id TEXT,                  -- над кем/чем
+    target_user_name TEXT,
+
+    domain TEXT,                          -- портал
+    details JSONB DEFAULT '{}'            -- доп. поля (id записи, даты, комментарий и т.д.)
+  )
+`);
+
+await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts DESC)`);
+await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_log_actor ON audit_log(actor_user_id)`);
+await pool.query(`CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action)`);
+
     console.log('✅ БД инициализирована');
 }
 
@@ -488,7 +519,32 @@ async function shouldSendReminder(userId) {
 }
 
 // ─── Администраторы ───────────────────────────────────────────────────────────
+// ─── Audit util ───────────────────────────────────────────────────────────────
+async function logAudit(action, actor, target = null, details = {}, domain = null) {
+  const actorId = actor?.id != null ? String(actor.id) : null;
+  const actorName = actor?.name || null;
 
+  const targetId = target?.id != null ? String(target.id) : null;
+  const targetName = target?.name || null;
+
+  try {
+    await pool.query(
+      `INSERT INTO audit_log(action, actor_user_id, actor_user_name, target_user_id, target_user_name, domain, details)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+      [
+        action,
+        actorId,
+        actorName,
+        targetId,
+        targetName,
+        domain,
+        JSON.stringify(details || {})
+      ]
+    );
+  } catch (e) {
+    console.error('❌ logAudit error:', e.message);
+  }
+}
 async function isAdmin(userId) {
     if (String(userId) === String(MANAGER_ID)) return true;
     const { rows } = await pool.query(`SELECT 1 FROM admins WHERE user_id=$1`, [String(userId)]);
@@ -749,6 +805,9 @@ function kbAdmin() {
         { TEXT:'👤 Управление',       COMMAND:'admin_manage', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#7b4fa6', TEXT_COLOR:'#ffffff' },
         { TEXT:'📤 Отчёт на почту',   COMMAND:'send_report',  COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#2e7d32', TEXT_COLOR:'#ffffff' },
         { TYPE:'NEWLINE' },
+        { TYPE:'NEWLINE' },
+        { TEXT:'🧹 Удалить отметки', COMMAND:'att_delete', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#c0392b', TEXT_COLOR:'#ffffff' },
+ { TEXT:'🧾 Журнал действий', COMMAND:'audit', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#34495e', TEXT_COLOR:'#ffffff' },
         { TEXT:'🔓 Выйти из админа',  COMMAND:'admin_logout', COMMAND_PARAMS:'', DISPLAY:'LINE', BG_COLOR:'#888888', TEXT_COLOR:'#ffffff' },
     ];
 }
@@ -1340,6 +1399,8 @@ async function registerCommands(domain, accessToken, botId) {
         { cmd:'bulk_select_user_2',  title:'Массово: сотрудник 3' },
         { cmd:'bulk_select_user_3',  title:'Массово: сотрудник 4' },
         { cmd:'bulk_select_user_4',  title:'Массово: сотрудник 5' },
+        { cmd:'audit', title:'Журнал действий' },
+ { cmd:'att_delete', title:'Удалить отметки' },
     ];
     for (const c of cmds) {
         const r = await callBitrix(domain, accessToken, 'imbot.command.register', {
@@ -1690,6 +1751,18 @@ app.post('/imbot', async (req, res) => {
             const idx  = parseInt(action.replace('select_user_', ''));
             const sel  = (pending.data.foundUsers || [])[idx];
             if (!sel) { await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Сотрудник не найден.`, kbCancel()); return; }
+ // Выбор сотрудника для удаления отметок
+ if (action.startsWith('select_user_') && pending?.action === 'att_delete_select_user') {
+ const idx = parseInt(action.replace('select_user_', ''));
+ const sel = (pending.data.foundUsers || [])[idx];
+ if (!sel) { await sendMessage(domain, authToken, botId, DIALOG_ID, `⚠️ Сотрудник не найден.`, kbCancel()); return; }
+ await setPending(FROM_USER_ID, 'att_delete', 'pick_date', { ...pending.data, targetUserId: sel.id, targetUserName: sel.name, adminSession: true });
+ await sendMessage(domain, authToken, botId, DIALOG_ID, `👤 Сотрудник: ${sel.name}
+
+📅 Введи дату (ДД.ММ.ГГГГ), за которую удалить отметки:`, kbCancel());
+ return;
+ }
+
             await setPending(FROM_USER_ID, 'schedule_add', 'date_from', { ...pending.data, userId: sel.id, userName: sel.name, adminSession: true });
             await sendMessage(domain, authToken, botId, DIALOG_ID, `👤 Сотрудник: ${sel.name}\n\n📅 Введи дату начала в формате ДД.ММ.ГГГГ:`, kbCancel());
             return;
@@ -2422,8 +2495,76 @@ const progressText =
             admins.forEach(a => { text += `• ${a.user_name||'Без имени'} (ID: ${a.user_id})\n`; });
             if (!admins.length) text += `\nДополнительных администраторов нет.`;
             await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdminManage());
+        
+        } else if (action === 'audit') {
+            if (!inAdminMode) {
+                await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа. Войдите в режим администратора.`, kb);
+                return;
+            }
 
-        } else if (action === 'admin_add') {
+            const { rows } = await pool.query(`
+                SELECT ts, action, actor_user_name, actor_user_id, target_user_name, target_user_id, details
+                FROM audit_log
+                WHERE ts >= NOW() - INTERVAL '30 days'
+                ORDER BY ts DESC
+                LIMIT 80
+            `);
+
+            if (!rows.length) {
+                await sendMessage(domain, authToken, botId, DIALOG_ID, `🧾 Журнал действий пуст за последние 30 дней.`, kbAdmin());
+                return;
+            }
+
+            const ACTION_LABELS = {
+                admin_add: '➕ Добавление администратора',
+                admin_remove: '➖ Удаление администратора',
+
+                schedule_add: '🗓 Добавление расписания',
+                schedule_delete: '🗑 Удаление записи расписания',
+                schedule_bulk_add: '👥 Массовое расписание',
+
+                work_schedule_assign: '📊 Назначение графика',
+                work_schedule_remove: '❌ Удаление графика',
+                work_schedule_bulk_assign: '👥 Массовое назначение графиков',
+
+                attendance_delete: '🧹 Удаление отметок'
+            };
+
+            let text = `🧾 Журнал действий администраторов (последние 30 дней)\n`;
+            text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+            for (const r of rows) {
+                const ts = new Date(r.ts).toLocaleString('ru-RU', { timeZone: 'Asia/Yekaterinburg' });
+                const label = ACTION_LABELS[r.action] || r.action;
+
+                const who = r.actor_user_name ? `${r.actor_user_name} (ID ${r.actor_user_id})` : `(ID ${r.actor_user_id || '—'})`;
+                const target = r.target_user_name ? ` → ${r.target_user_name} (ID ${r.target_user_id})` : '';
+
+            let extra = '';
+            try {
+                const d = r.details || {};
+                if (d && Object.keys(d).length) extra = `\n   • ${JSON.stringify(d)}`;
+            } catch (_) {}
+
+                text += `🕒 ${ts}\n`;
+                text += `✅ ${label}\n`;
+                text += `👤 ${who}${target}${extra}\n\n`;
+             }
+
+            await sendMessage(domain, authToken, botId, DIALOG_ID, text, kbAdmin());
+        return;
+            
+        
+ } else if (action === 'att_delete') {
+ if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
+ await setPending(FROM_USER_ID, 'att_delete', 'search_user', { adminSession: true });
+ await sendMessage(domain, authToken, botId, DIALOG_ID,
+ `🧹 Удаление отметок
+
+🔍 Введи имя или фамилию сотрудника:`,
+ kbCancel());
+ return;
+} else if (action === 'admin_add') {
             if (!inAdminMode) { await sendMessage(domain, authToken, botId, DIALOG_ID, `🚫 Нет доступа.`, kb); return; }
             await setPending(FROM_USER_ID, 'admin_add', 'user_id', { adminSession:true });
             await sendMessage(domain, authToken, botId, DIALOG_ID,
@@ -2546,6 +2687,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         const b24user = await getBitrixUser(domain, authToken, newId);
         const newName = b24user?.name || `Пользователь ${newId}`;
         await addAdmin(newId, newName);
+        await logAudit('admin_add',{ id: userId, name: userName },{ id: newId, name: newName },{},domain);
         await done(`✅ ${newName} (ID ${newId}) теперь администратор!\n\nЕму стала доступна кнопка "🔐 Режим администратора".`, kbAdminManage());
         return;
     }
@@ -2555,6 +2697,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         if (!remId) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Введи числовой ID:`, kbCancel()); return; }
         if (String(remId) === String(MANAGER_ID)) { await done(`🚫 Нельзя удалить главного администратора!`, kbAdminManage()); return; }
         await removeAdmin(remId);
+        await logAudit('admin_remove',{ id: userId, name: userName },{ id: remId, name: null },{},domain);
         await done(`✅ Пользователь ID ${remId} удалён из администраторов.`, kbAdminManage());
         return;
     }
@@ -2744,6 +2887,11 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
                 selectedUsers, status, dateFrom, dateTo, comment,
                 userId, conflictMapRaw, userIds
             );
+            
+            await logAudit('schedule_bulk_add', { id: FROM_USER_ID, name: resolvedName }, null,
+                {mode: 'skip', status, date_from: dateFrom, date_to: dateTo, comment: comment || null, created, skipped},
+            domain);
+
             await clearPending(userId);
             if (data.adminSession) await setPending(userId, 'admin_session', 'active');
             for (const emp of selectedUsers.filter(u => created.includes(u.name))) {
@@ -2772,7 +2920,68 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         return;
     }
 
-    if (action === 'schedule_add' && step === 'search_user') {
+    
+ // ── Удаление отметок (attendance): поиск сотрудника ─────────────────────────
+ if (action === 'att_delete' && step === 'search_user') {
+ const users = await searchBitrixUsers(domain, authToken, val);
+ if (!users.length) {
+ await sendMessage(domain, authToken, botId, dialogId, `❌ Сотрудник "${val}" не найден. Попробуй другое имя:`, kbCancel());
+ return;
+ }
+ if (users.length === 1) {
+ await setPending(userId, 'att_delete', 'pick_date', { ...data, targetUserId: users[0].id, targetUserName: users[0].name, adminSession: true });
+ await sendMessage(domain, authToken, botId, dialogId, `👤 Найден: ${users[0].name}
+
+📅 Введи дату (ДД.ММ.ГГГГ), за которую удалить отметки:`, kbCancel());
+ return;
+ }
+await setPending(userId, 'att_delete_select_user', 'pick', { ...data, foundUsers: users, adminSession: true });
+
+const list = users
+  .slice(0, 5)
+  .map((u, i) => `${i + 1}. ${u.name}`)
+  .join('\n');
+
+await sendMessage(
+  domain, authToken, botId, dialogId,
+  `🔍 Найдено несколько сотрудников — выбери нужного:\n\n${list}`,
+  kbUserSelect(users)
+);
+
+return;
+ }
+
+ // ── Удаление отметок: ввод даты и удаление ─────────────────────────────────
+ if (action === 'att_delete' && step === 'pick_date') {
+ const d = parseDate(val);
+ if (!d) {
+ await sendMessage(domain, authToken, botId, dialogId, `⚠️ Неверный формат. Введи ДД.ММ.ГГГГ:`, kbCancel());
+ return;
+ }
+ const { rowCount } = await pool.query(`
+ DELETE FROM attendance
+ WHERE user_id = $1
+ AND (timestamp AT TIME ZONE 'Asia/Yekaterinburg')::date = $2::date
+ `, [String(data.targetUserId), d]);
+
+ // ЛОГИРОВАНИЕ УДАЛЕНИЯ ОТМЕТОК
+ await logAudit('attendance_delete',
+ { id: userId, name: userName },
+ { id: data.targetUserId, name: data.targetUserName },
+ { date: d, deleted_rows: rowCount },
+ domain);
+
+ await clearPending(userId);
+ if (data.adminSession) await setPending(userId, 'admin_session', 'active');
+ await sendMessage(domain, authToken, botId, dialogId,
+ rowCount ? `✅ Удалено отметок: ${rowCount}
+👤 ${data.targetUserName}
+📅 Дата: ${val}` : `ℹ️ За ${val} у ${data.targetUserName} не было отметок.`,
+ kbAdmin());
+ return;
+ }
+
+if (action === 'schedule_add' && step === 'search_user') {
         const users = await searchBitrixUsers(domain, authToken, val);
         if (!users.length) {
             await sendMessage(domain, authToken, botId, dialogId, `❌ Сотрудник "${val}" не найден.\n\nПопробуй другое имя:`, kbCancel());
@@ -2806,19 +3015,38 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         return;
     }
 
+    
     if (action === 'schedule_add' && step === 'comment') {
         const comment = (val === '-' || val === '—') ? null : val;
-        await pool.query(
-            `INSERT INTO schedules (user_id,user_name,status,date_from,date_to,comment,created_by) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        const ins = await pool.query(
+            `INSERT INTO schedules (user_id,user_name,status,date_from,date_to,comment,created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7)
+             RETURNING id`,
             [data.userId, data.userName, data.status, data.dateFrom, data.dateTo, comment, userId]);
 
-        const from  = new Date(data.dateFrom).toLocaleDateString('ru-RU');
-        const to    = new Date(data.dateTo).toLocaleDateString('ru-RU');
+        const schedId = ins.rows?.[0]?.id;
+        await logAudit(
+            'schedule_add',
+            { id: userId, name: userName },
+            { id: data.userId, name: data.userName },
+            {
+                schedule_id: schedId,
+                status: data.status,
+                date_from: data.dateFrom,
+                date_to: data.dateTo,
+                comment: comment || null
+            },
+        domain);
+
+        const from = new Date(data.dateFrom).toLocaleDateString('ru-RU');
+        const to = new Date(data.dateTo).toLocaleDateString('ru-RU');
         const label = SCHED_LABELS[data.status];
 
         await done(
-            `✅ Запись добавлена в расписание!\n\n👤 ${data.userName}\n📋 ${label}\n📅 ${from} — ${to}` + (comment ? `\n💬 ${comment}` : ''),
-            kbSchedule());
+            `✅ Запись добавлена в расписание!\n\n👤 ${data.userName}\n📋 ${label}\n📅 ${from} — ${to}` +
+            (comment ? `\n💬 ${comment}` : ''),
+                kbSchedule());
+
 
         if (data.userId) {
             const portal = await getPortal(domain);
@@ -2837,8 +3065,18 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
     if (action === 'schedule_delete' && step === 'id') {
         const id = parseInt(val);
         if (!id) { await sendMessage(domain, authToken, botId, dialogId, `⚠️ Введи числовой ID записи:`, kbCancel()); return; }
+        const before = await pool.query(`SELECT * FROM schedules WHERE id=$1`, [id]);
+        const rec = before.rows?.[0] || null;
         const { rowCount } = await pool.query(`DELETE FROM schedules WHERE id=$1`, [id]);
         await done(rowCount ? `✅ Запись #${id} удалена.` : `❌ Запись #${id} не найдена.`, kbSchedule());
+        if (rowCount && rec) {
+        await logAudit(
+            'schedule_delete',
+            { id: userId, name: userName },
+            { id: rec.user_id, name: rec.user_name },
+            { schedule_id: id, status: rec.status, date_from: rec.date_from, date_to: rec.date_to, comment: rec.comment || null },
+            domain);
+    }
         return;
     }
 
@@ -2909,7 +3147,7 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
         const endRu = dateEnd ? new Date(dateEnd).toLocaleDateString('ru-RU') : 'бессрочно';
         
         await setEmpWorkSchedule(data.userId, data.userName, data.scheduleType, data.cycleStart, dateEnd, userId);
-        
+        await logAudit('work_schedule_assign',{ id: userId, name: userName },{ id: data.userId, name: data.userName },{ schedule_type: data.scheduleType, cycle_start: data.cycleStart, date_end: dateEnd || null },domain);
         await clearPending(userId);
         if (data.adminSession) await setPending(userId, 'admin_session', 'active');
         
@@ -2934,6 +3172,11 @@ async function handlePendingInput(domain, authToken, botId, dialogId, userId, us
                 kbWorkSched());
             return;
         }
+        
+        if (removed) {
+            await logAudit('work_schedule_remove', { id: FROM_USER_ID, name: resolvedName },{ id: sel.id, name: sel.name }, {}, domain);
+        }
+
         await setPending(userId, 'ws_remove', 'pick_user', { ...data, foundUsers: users });
         const btns = users.slice(0, 5).flatMap((u, i) => {
             const line = (i > 0 && i % 2 === 0) ? [{ TYPE:'NEWLINE' }] : [];
