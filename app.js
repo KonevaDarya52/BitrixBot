@@ -1316,6 +1316,7 @@ async function notifyUserInBotChat(domain, accessToken, botId, targetUserId, mes
     return sendMessageWithRetry(domain, accessToken, botId, dialogId, message, keyboard);
 }
 
+
 // ─── Регистрация команд ───────────────────────────────────────────────────────
 
 async function registerCommands(domain, accessToken, botId) {
