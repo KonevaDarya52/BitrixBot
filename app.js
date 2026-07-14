@@ -1571,6 +1571,118 @@ h1{color:#2e7d32;margin-bottom:16px}p{color:#555;line-height:1.6}</style></head>
 <script>BX24.init(function(){BX24.installFinish();});</script></body></html>`);
 });
 
+// ─── GET /install (для редиректа после установки) ──────────────────────────
+
+app.get('/install', (req, res) => {
+    const { code, domain } = req.query;
+    
+    if (code) {
+        // Получили код от Bitrix24 — перенаправляем на POST обработку
+        res.send(`
+            <html>
+                <body>
+                    <h2>⏳ Установка бота...</h2>
+                    <p>Получен код от Bitrix24. Завершаем установку...</p>
+                    <script>
+                        // Отправляем код на POST /install
+                        fetch('/install', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                AUTH_ID: '${code}',
+                                DOMAIN: '${domain || 'b24-nayfvt.bitrix24.ru'}'
+                            })
+                        })
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data.ok) {
+                                document.body.innerHTML = '<h2>✅ Бот установлен!</h2><p>Найдите бота в чатах Bitrix24 и нажмите "Пришёл".</p>';
+                            } else {
+                                document.body.innerHTML = '<h2>❌ Ошибка установки</h2><p>' + JSON.stringify(data) + '</p>';
+                            }
+                        })
+                        .catch(err => {
+                            document.body.innerHTML = '<h2>❌ Ошибка</h2><p>' + err.message + '</p>';
+                        });
+                    </script>
+                </body>
+            </html>
+        `);
+    } else {
+        res.send(`
+            <html>
+                <body>
+                    <h2>🤖 Установка бота учета времени</h2>
+                    <p>Нажмите кнопку ниже, чтобы установить бота:</p>
+                    <a href="https://b24-nayfvt.bitrix24.ru/oauth/authorize/?client_id=local.6a55eee335bb98.00898702&response_type=code&redirect_uri=https://bitrixbot-bnnd.onrender.com/install" 
+                       style="display:inline-block;padding:15px 30px;background:#2d8cff;color:white;text-decoration:none;border-radius:8px;font-size:18px;">
+                        📥 Установить в Bitrix24
+                    </a>
+                </body>
+            </html>
+        `);
+    }
+});
+
+// ─── ПРЯМОЕ ДОБАВЛЕНИЕ ПОРТАЛА (для отладки) ──────────────────────────────
+
+app.get('/add-portal', async (req, res) => {
+    const domain = req.query.domain || 'b24-nayfvt.bitrix24.ru';
+    
+    try {
+        await pool.query(
+            `INSERT INTO portals (domain, access_token, refresh_token, bot_id, client_endpoint, updated_at)
+             VALUES ($1, $2, $3, $4, $5, NOW())
+             ON CONFLICT (domain) DO UPDATE SET updated_at = NOW()`,
+            [domain, 'temp_' + Date.now(), '', '', '']
+        );
+        res.json({ ok: true, message: `Портал ${domain} добавлен` });
+    } catch (err) {
+        res.json({ ok: false, error: err.message });
+    }
+});
+
+// ─── ОБНОВЛЕНИЕ ТОКЕНА ВРУЧНУЮ ──────────────────────────────────────────────
+
+app.get('/update-token', async (req, res) => {
+    const domain = req.query.domain || 'b24-nayfvt.bitrix24.ru';
+    const code = req.query.code;
+    
+    if (!code) {
+        return res.json({ ok: false, error: 'Не передан code' });
+    }
+    
+    try {
+        // Обмениваем code на токен
+        const response = await axios.post('https://oauth.bitrix24.tech/oauth/token/', null, {
+            params: {
+                grant_type: 'authorization_code',
+                client_id: CLIENT_ID,
+                client_secret: CLIENT_SECRET,
+                code: code,
+                redirect_uri: `https://${APP_DOMAIN}/install`
+            }
+        });
+        
+        const { access_token, refresh_token } = response.data;
+        
+        await pool.query(
+            `UPDATE portals 
+             SET access_token = $1, refresh_token = $2, updated_at = NOW()
+             WHERE domain = $3`,
+            [access_token, refresh_token, domain]
+        );
+        
+        res.json({ 
+            ok: true, 
+            message: `Токен обновлён для ${domain}`,
+            access_token: access_token.slice(0, 20) + '...'
+        });
+    } catch (err) {
+        res.json({ ok: false, error: err.message, details: err.response?.data });
+    }
+});
+
 app.get('/geo', (req, res) => {
     const { token } = req.query;
     if (!token) return res.status(400).send('Токен не найден');
